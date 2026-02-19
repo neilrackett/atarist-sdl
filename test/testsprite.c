@@ -29,15 +29,43 @@ static void quit(int rc)
 	exit(rc);
 }
 
-int LoadSprite(const char *file)
+int LoadSprite(SDL_Surface *screen, const char *file)
 {
 	SDL_Surface *temp;
+	int i;
 
 	/* Load the sprite image */
 	sprite = SDL_LoadBMP(file);
 	if ( sprite == NULL ) {
 		fprintf(stderr, "Couldn't load %s: %s", file, SDL_GetError());
 		return(-1);
+	}
+
+	/* For palettized modes, create a compact palette to test MiNT optimisations for ST low-res */
+	if ( screen->format->palette && sprite->format->palette ) {
+		SDL_Color palette[256];
+		SDL_Color tmp;
+		int ncolors;
+		int black;
+
+		ncolors = sprite->format->palette->ncolors;
+		if ( ncolors > 256 ) ncolors = 256;
+		SDL_memset(palette, 0, sizeof(palette));
+		SDL_memcpy(palette, sprite->format->palette->colors, ncolors*sizeof(SDL_Color));
+
+		black = 0;
+		for ( i=0; i<ncolors; ++i ) {
+			if ( (palette[i].r == 0) && (palette[i].g == 0) && (palette[i].b == 0) ) {
+				black = i;
+				break;
+			}
+		}
+		if ( black ) {
+			tmp = palette[0];
+			palette[0] = palette[black];
+			palette[black] = tmp;
+		}
+		SDL_SetColors(screen, palette, 0, 256);
 	}
 
 	/* Optional transparency using the pixel at (0,0) */
@@ -240,7 +268,7 @@ int main(int argc, char *argv[])
 	}
 
 	/* Load the sprite */
-	if ( LoadSprite("icon.bmp") < 0 ) {
+	if ( LoadSprite(screen, "icon.bmp") < 0 ) {
 		quit(1);
 	}
 
