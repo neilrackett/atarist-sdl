@@ -102,7 +102,11 @@ static int Audio_Available(void)
 	cookie_gsxb = (Getcookie(C_GSXB, &cookie_gsxb) == C_FOUND);
 
 	/* Is it GSXB ? */
+#ifdef SND_GSXB
 	if (((cookie_snd & SND_GSXB)==0) || (cookie_gsxb==0)) {
+#else
+	if (cookie_gsxb==0) {
+#endif
 		DEBUG_PRINT((DEBUG_NAME "no GSXB audio\n"));
 		return(0);
 	}

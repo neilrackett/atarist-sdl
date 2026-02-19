@@ -35,6 +35,9 @@ build-deps
 *.tmp
 *.rej
 *.d
+*.tos
+*.prg
+*.ttp
 .vscode/**
 
 # for Xcode

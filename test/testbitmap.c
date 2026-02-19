@@ -54,8 +54,10 @@ int main(int argc, char *argv[])
 {
 	SDL_Surface *screen;
 	SDL_Surface *bitmap;
+	int width, height;
 	Uint8  video_bpp;
 	Uint32 videoflags;
+	int mode_specified;
 	Uint8 *buffer;
 	int i, k, done;
 	SDL_Event event;
@@ -71,12 +73,26 @@ int main(int argc, char *argv[])
 		return(1);
 	}
 
-	video_bpp = 0;
+	video_bpp = 8;
+	width = 640;
+	height = 480;
+	mode_specified = 0;
 	videoflags = SDL_SWSURFACE;
 	while ( argc > 1 ) {
 		--argc;
+		if ( strcmp(argv[argc-1], "-width") == 0 ) {
+			width = atoi(argv[argc]);
+			mode_specified = 1;
+			--argc;
+		} else
+		if ( strcmp(argv[argc-1], "-height") == 0 ) {
+			height = atoi(argv[argc]);
+			mode_specified = 1;
+			--argc;
+		} else
 		if ( strcmp(argv[argc-1], "-bpp") == 0 ) {
 			video_bpp = atoi(argv[argc]);
+			mode_specified = 1;
 			--argc;
 		} else
 		if ( strcmp(argv[argc], "-warp") == 0 ) {
@@ -89,16 +105,24 @@ int main(int argc, char *argv[])
 			videoflags |= SDL_FULLSCREEN;
 		} else {
 			fprintf(stderr,
-			"Usage: %s [-bpp N] [-warp] [-hw] [-fullscreen]\n",
+			"Usage: %s [-width N] [-height N] [-bpp N] [-warp] [-hw] [-fullscreen]\n",
 								argv[0]);
 			quit(1);
 		}
 	}
 
-	/* Set 640x480 video mode */
-	if ( (screen=SDL_SetVideoMode(640,480,video_bpp,videoflags)) == NULL ) {
-		fprintf(stderr, "Couldn't set 640x480x%d video mode: %s\n",
-						video_bpp, SDL_GetError());
+	/* Set video mode */
+	if ( (screen=SDL_SetVideoMode(width,height,video_bpp,videoflags)) == NULL ) {
+		if ( ! mode_specified ) {
+			width = 320;
+			height = 200;
+			video_bpp = 8;
+			screen = SDL_SetVideoMode(width, height, video_bpp, videoflags);
+		}
+	}
+	if ( screen == NULL ) {
+		fprintf(stderr, "Couldn't set %dx%dx%d video mode: %s\n",
+						width, height, video_bpp, SDL_GetError());
 		quit(2);
 	}
 
@@ -141,6 +165,10 @@ int main(int argc, char *argv[])
 	SDL_UnlockSurface(screen);
 	SDL_UpdateRect(screen, 0, 0, 0, 0);
 
+	/* Drop any startup events inherited from launcher dialogs */
+	while ( SDL_PollEvent(&event) ) {
+	}
+
 	/* Load the bitmap */
 	bitmap = LoadXBM(screen, picture_width, picture_height,
 					(Uint8 *)picture_bits);
@@ -167,8 +195,9 @@ int main(int argc, char *argv[])
 					}
 					break;
 				case SDL_KEYDOWN:
-					/* Any key press quits the app... */
-					done = 1;
+					if (event.key.keysym.sym == SDLK_ESCAPE) {
+						done = 1;
+					}
 					break;
 				case SDL_QUIT:
 					done = 1;

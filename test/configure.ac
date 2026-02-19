@@ -37,7 +37,7 @@ case "$host" in
         SYS_GL_LIBS=""
         ;;
     *-*-mint*)
-        EXE=""
+        EXE=".TTP"
         MATHLIB=""
         AC_PATH_PROG(OSMESA_CONFIG, osmesa-config, no)
         if test "x$OSMESA_CONFIG" = "xyes"; then

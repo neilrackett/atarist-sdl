@@ -22,10 +22,16 @@
 #include "SDL_config.h"
 
 /*
- * Xbios SDL video driver
- *
- * Patrice Mandin
- */
+    Xbios SDL video driver
+
+    Patrice Mandin
+*/
+
+/*
+    Support for colour and bayer dithering in ST low-res
+
+    Neil Rackett
+*/
 
 #include <sys/stat.h>
 #include <unistd.h>
@@ -586,6 +592,7 @@ static void XBIOS_UpdateRects(_THIS, int numrects, SDL_Rect *rects)
 {
 	/* SDL_UpdateRects() already added surface->offset_[xy] to each rect's coordinates */
 	SDL_Surface *surface = this->screen;
+	Uint8 *c2p_source;
 
 	if (this->shadow && !shadow_warning_shown) {
 		fprintf(stderr, "Warning: shadow buffer in use due to SDL_SetVideoMode(SDL_SWSURFACE)\n");
@@ -602,6 +609,25 @@ static void XBIOS_UpdateRects(_THIS, int numrects, SDL_Rect *rects)
 
 	if (XBIOS_current->flags & XBIOSMODE_C2P) {
 		const int doubleline = (XBIOS_current->flags & XBIOSMODE_DOUBLELINE ? 1 : 0);
+		const int use_st_dither = (XBIOS_current->depth == 4) && (XBIOS_current->number == (ST_LOW >> 8));
+		c2p_source = surface->pixels + src_offset;
+
+		if (use_st_dither && SDL_XBIOS_ST_ConsumeFullRefresh(this)) {
+			c2p_source = SDL_XBIOS_ST_DitherRect(
+				this, surface->pixels + src_offset,
+				0, 0,
+				surface->w, surface->h,
+				surface->pitch
+			);
+			SDL_Atari_C2pConvert(
+				c2p_source, XBIOS_screens[XBIOS_fbnum],
+				0, 0,
+				surface->w, surface->h,
+				doubleline, XBIOS_current->depth,
+				surface->pitch, XBIOS_pitch
+			);
+			numrects = 0;
+		}
 
 		for (i=0;i<numrects;i++) {
 			int x1,x2;
@@ -612,9 +638,18 @@ static void XBIOS_UpdateRects(_THIS, int numrects, SDL_Rect *rects)
 				x2 = (x2 | 15) +1;
 			}
 
+			if (use_st_dither) {
+				c2p_source = SDL_XBIOS_ST_DitherRect(
+					this, surface->pixels + src_offset,
+					x1, rects[i].y,
+					x2-x1, rects[i].h,
+					surface->pitch
+				);
+			}
+
 			/* Convert chunky to planar screen */
 			SDL_Atari_C2pConvert(
-				surface->pixels + src_offset, XBIOS_screens[XBIOS_fbnum],
+				c2p_source, XBIOS_screens[XBIOS_fbnum],
 				x1, rects[i].y,
 				x2-x1, rects[i].h,
 				doubleline, XBIOS_current->depth,
@@ -650,6 +685,7 @@ static int XBIOS_FlipHWSurface(_THIS, SDL_Surface *surface)
 	/* SDL_LockSurface() adds surface->offset to surface->pixels */
 	int src_offset = (surface->locked ? 0 : surface->offset);
 	int dst_offset;
+	Uint8 *c2p_source;
 
 	if (this->shadow && !shadow_warning_shown) {
 		fprintf(stderr, "Warning: shadow buffer in use due to SDL_SetVideoMode(SDL_SWSURFACE)\n");
@@ -658,13 +694,23 @@ static int XBIOS_FlipHWSurface(_THIS, SDL_Surface *surface)
 
 	if (XBIOS_current->flags & XBIOSMODE_C2P) {
 		const int doubleline = (XBIOS_current->flags & XBIOSMODE_DOUBLELINE ? 1 : 0);
+		const int use_st_dither = (XBIOS_current->depth == 4) && (XBIOS_current->number == (ST_LOW >> 8));
 
 		dst_offset = this->offset_y * (XBIOS_pitch << doubleline) +
 				(this->offset_x & ~15) * XBIOS_current->depth / 8;
+		c2p_source = surface->pixels + src_offset;
+		if (use_st_dither) {
+			c2p_source = SDL_XBIOS_ST_DitherRect(
+				this, surface->pixels + src_offset,
+				0, 0,
+				surface->w, surface->h,
+				surface->pitch
+			);
+		}
 
 		/* Convert chunky to planar screen */
 		SDL_Atari_C2pConvert(
-			surface->pixels + src_offset, ((Uint8 *)XBIOS_screens[XBIOS_fbnum]) + dst_offset,
+			c2p_source, ((Uint8 *)XBIOS_screens[XBIOS_fbnum]) + dst_offset,
 			0, 0,
 			surface->w, surface->h,
 			doubleline, XBIOS_current->depth,

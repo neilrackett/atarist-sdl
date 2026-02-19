@@ -19,6 +19,7 @@ SDL_Rect *positions;
 SDL_Rect *velocities;
 int sprites_visible;
 int debug_flip;
+int use_colorkey;
 Uint16 sprite_w, sprite_h;
 
 /* Call this instead of exit(), so we can clean up SDL: atexit() is evil. */
@@ -39,10 +40,10 @@ int LoadSprite(const char *file)
 		return(-1);
 	}
 
-	/* Set transparent pixel as the pixel at (0,0) */
-	if ( sprite->format->palette ) {
+	/* Optional transparency using the pixel at (0,0) */
+	if ( use_colorkey && sprite->format->palette ) {
 		SDL_SetColorKey(sprite, (SDL_SRCCOLORKEY|SDL_RLEACCEL),
-						*(Uint8 *)sprite->pixels);
+							*(Uint8 *)sprite->pixels);
 	}
 
 	/* Convert sprite to video format */
@@ -155,6 +156,7 @@ int main(int argc, char *argv[])
 	int width, height;
 	Uint8  video_bpp;
 	Uint32 videoflags;
+	int mode_specified;
 	Uint32 background;
 	int    i, done;
 	SDL_Event event;
@@ -171,19 +173,24 @@ int main(int argc, char *argv[])
 	width = 640;
 	height = 480;
 	video_bpp = 8;
+	mode_specified = 0;
 	debug_flip = 0;
+	use_colorkey = 0;
 	while ( argc > 1 ) {
 		--argc;
 		if ( strcmp(argv[argc-1], "-width") == 0 ) {
 			width = atoi(argv[argc]);
+			mode_specified = 1;
 			--argc;
 		} else
 		if ( strcmp(argv[argc-1], "-height") == 0 ) {
 			height = atoi(argv[argc]);
+			mode_specified = 1;
 			--argc;
 		} else
 		if ( strcmp(argv[argc-1], "-bpp") == 0 ) {
 			video_bpp = atoi(argv[argc]);
+			mode_specified = 1;
 			videoflags &= ~SDL_ANYFORMAT;
 			--argc;
 		} else
@@ -202,6 +209,9 @@ int main(int argc, char *argv[])
 		if ( strcmp(argv[argc], "-fullscreen") == 0 ) {
 			videoflags ^= SDL_FULLSCREEN;
 		} else
+		if ( strcmp(argv[argc], "-colorkey") == 0 ) {
+			use_colorkey = 1;
+		} else
 		if ( strcmp(argv[argc], "-noframe") == 0 ) {
 			videoflags ^= SDL_NOFRAME;
 		} else
@@ -209,7 +219,7 @@ int main(int argc, char *argv[])
 			numsprites = atoi(argv[argc]);
 		} else {
 			fprintf(stderr, 
-	"Usage: %s [-bpp N] [-hw] [-flip] [-fast] [-fullscreen] [numsprites]\n",
+	"Usage: %s [-width N] [-height N] [-bpp N] [-hw] [-flip] [-fast] [-fullscreen] [-colorkey] [numsprites]\n",
 								argv[0]);
 			quit(1);
 		}
@@ -217,6 +227,12 @@ int main(int argc, char *argv[])
 
 	/* Set video mode */
 	screen = SDL_SetVideoMode(width, height, video_bpp, videoflags);
+	if ( ! screen && ! mode_specified ) {
+		width = 320;
+		height = 200;
+		video_bpp = 8;
+		screen = SDL_SetVideoMode(width, height, video_bpp, videoflags);
+	}
 	if ( ! screen ) {
 		fprintf(stderr, "Couldn't set %dx%d video mode: %s\n",
 					width, height, SDL_GetError());

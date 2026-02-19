@@ -44,7 +44,9 @@
 #include "SDL_xbiosevents_c.h"
 
 /* from src/audio/mint/SDL_mintaudio.c */
+#ifdef SDL_AUDIO_DRIVER_MINT
 void SDL_AtariMint_UpdateAudio(void);
+#endif
 /* from src/timer/mint/SDL_systimer.c */
 #ifdef SDL_TIMER_MINT
 void SDL_AtariMint_CheckTimer(void);
@@ -234,7 +236,9 @@ SDL_keysym *SDL_Atari_TranslateKey(int scancode, SDL_keysym *keysym,
 
 void SDL_AtariMint_BackgroundTasks(void)
 {
+#ifdef SDL_AUDIO_DRIVER_MINT
 	SDL_AtariMint_UpdateAudio();
+#endif
 #ifdef SDL_TIMER_MINT
 	if (SDL_timer_running) SDL_AtariMint_CheckTimer();
 #else

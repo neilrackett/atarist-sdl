@@ -239,6 +239,7 @@ int main(int argc, char *argv[])
 	int delay;
 	int w, h;
 	int desired_bpp;
+	int mode_specified;
 	Uint32 video_flags;
 #ifdef BENCHMARK_SDL
 	Uint32 then, now;
@@ -258,6 +259,7 @@ int main(int argc, char *argv[])
 	w = 640;
 	h = 480;
 	desired_bpp = 0;
+	mode_specified = 0;
 	video_flags = 0;
 #endif
 	if ( SDL_Init(SDL_INIT_VIDEO) < 0 ) {
@@ -290,6 +292,7 @@ int main(int argc, char *argv[])
 		} else
 		if ( strcmp(argv[1], "-width") == 0 ) {
 			if ( argv[2] && ((w = atoi(argv[2])) > 0) ) {
+				mode_specified = 1;
 				argv += 2;
 				argc -= 2;
 			} else {
@@ -300,6 +303,7 @@ int main(int argc, char *argv[])
 		} else
 		if ( strcmp(argv[1], "-height") == 0 ) {
 			if ( argv[2] && ((h = atoi(argv[2])) > 0) ) {
+				mode_specified = 1;
 				argv += 2;
 				argc -= 2;
 			} else {
@@ -311,6 +315,7 @@ int main(int argc, char *argv[])
 		if ( strcmp(argv[1], "-bpp") == 0 ) {
 			if ( argv[2] ) {
 				desired_bpp = atoi(argv[2]);
+				mode_specified = 1;
 				argv += 2;
 				argc -= 2;
 			} else {
@@ -344,6 +349,12 @@ int main(int argc, char *argv[])
 
 	/* Initialize the display */
 	screen = SDL_SetVideoMode(w, h, desired_bpp, video_flags);
+	if ( (screen == NULL) && !mode_specified ) {
+		w = 320;
+		h = 200;
+		desired_bpp = 8;
+		screen = SDL_SetVideoMode(w, h, desired_bpp, video_flags);
+	}
 	if ( screen == NULL ) {
 		fprintf(stderr, "Couldn't set %dx%dx%d video mode: %s\n",
 					w, h, desired_bpp, SDL_GetError());

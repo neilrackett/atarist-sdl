@@ -12,6 +12,7 @@ static int visible = 1;
 
 static Uint8  video_bpp;
 static Uint32 video_flags;
+static int mode_specified;
 
 /* Call this instead of exit(), so we can clean up SDL: atexit() is evil. */
 static void quit(int rc)
@@ -28,11 +29,18 @@ int SetVideoMode(int w, int h)
 	SDL_Color palette[256];
 
 	screen = SDL_SetVideoMode(w, h, video_bpp, video_flags);
+	if ( (screen == NULL) && !mode_specified ) {
+		w = 320;
+		h = 200;
+		video_bpp = 8;
+		screen = SDL_SetVideoMode(w, h, video_bpp, video_flags);
+	}
 	if (  screen == NULL ) {
 		fprintf(stderr, "Couldn't set %dx%dx%d video mode: %s\n",
 					w, h, video_bpp, SDL_GetError());
 		return(-1);
 	}
+	mode_specified = 1;
 	printf("Running in %s mode\n", screen->flags & SDL_FULLSCREEN ?
 						"fullscreen" : "windowed");
 
@@ -353,6 +361,7 @@ int main(int argc, char *argv[])
 	h = 480;
 	video_bpp = 8;
 	video_flags = SDL_SWSURFACE;
+	mode_specified = 0;
 	parsed = 1;
 	while ( parsed ) {
 		if ( (argc >= 2) && (strcmp(argv[1], "-fullscreen") == 0) ) {
@@ -372,16 +381,19 @@ int main(int argc, char *argv[])
 		} else
 		if ( (argc >= 3) && (strcmp(argv[1], "-width") == 0) ) {
 			w = atoi(argv[2]);
+			mode_specified = 1;
 			argc -= 2;
 			argv += 2;
 		} else
 		if ( (argc >= 3) && (strcmp(argv[1], "-height") == 0) ) {
 			h = atoi(argv[2]);
+			mode_specified = 1;
 			argc -= 2;
 			argv += 2;
 		} else
 		if ( (argc >= 3) && (strcmp(argv[1], "-bpp") == 0) ) {
 			video_bpp = atoi(argv[2]);
+			mode_specified = 1;
 			argc -= 2;
 			argv += 2;
 		} else {
