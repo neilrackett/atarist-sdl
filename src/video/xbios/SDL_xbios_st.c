@@ -50,6 +50,12 @@ static const xbiosmode_t stmodes[]={
 #define ST_LOW_HEIGHT 200
 #define ST_REMAP_CHANGE_THRESHOLD 192
 
+enum {
+	ST_RENDER_GRAYSCALE = 0,
+	ST_RENDER_GRAYSCALE_DITHER,
+	ST_RENDER_COLOR_DITHER
+};
+
 static const Uint8 bayer4x4[16]={
 	0,8,2,10,
 	12,4,14,6,
@@ -64,9 +70,9 @@ static int st_palette_init = 0;
 static Uint8 st_palette_source[16];
 static Uint8 st_palette_used[256];
 static Uint8 st_dither_map[16][256];
-static Uint32 st_dither_buffer[ST_LOW_WIDTH*ST_LOW_HEIGHT/4];
 static int st_force_full_refresh = 1;
 static int st_map_used_count = 0;
+static int st_render_mode = ST_RENDER_COLOR_DITHER;
 
 static void listModes(_THIS, int actually_add);
 static void saveMode(_THIS, SDL_PixelFormat *vformat);
@@ -80,6 +86,8 @@ static void swapVbuffers(_THIS);
 static int allocVbuffers(_THIS, const xbiosmode_t *new_video_mode, int num_buffers, int bufsize);
 static void freeVbuffers(_THIS);
 static int setColors(_THIS, int firstcolor, int ncolors, SDL_Color *colors);
+static void updateGrayPalette(_THIS, int dither);
+static void updateRenderMode(void);
 
 static __inline__ int colorDist(SDL_Color c1, SDL_Color c2)
 {
@@ -98,6 +106,28 @@ static __inline__ Uint16 ataricomponent(Uint8 value)
 	component = (value & 0xe0) >> 5;
 	component |= (value & 0x10) >> 1;
 	return component;
+}
+
+static __inline__ int colorGray(SDL_Color color)
+{
+	return (77 * (int)color.r + 150 * (int)color.g + 29 * (int)color.b + 128) >> 8;
+}
+
+static void updateRenderMode(void)
+{
+	const char *envr;
+	int mode;
+
+	st_render_mode = ST_RENDER_COLOR_DITHER;
+	envr = SDL_getenv("SDL_XBIOS_ST_RENDER_MODE");
+	if (envr == NULL) {
+		return;
+	}
+
+	mode = SDL_atoi(envr);
+	if ((mode >= ST_RENDER_GRAYSCALE) && (mode <= ST_RENDER_COLOR_DITHER)) {
+		st_render_mode = mode;
+	}
 }
 
 static int isUniformPalette(SDL_Color *colors, int ncolors)
@@ -297,8 +327,8 @@ static void updatePalette(_THIS, int refine_palette)
 		int phase;
 		int best, second;
 
-		best = inverse_map[SDL_Atari_C2pPalette4[i]];
-		second = inverse_map[second_choice[i]];
+		best = SDL_Atari_C2pPalette4[i];
+		second = second_choice[i];
 		for (phase = 0; phase < 16; ++phase) {
 			st_dither_map[phase][i] = (bayer4x4[phase] < spread_choice[i]) ? second : best;
 		}
@@ -308,19 +338,72 @@ static void updatePalette(_THIS, int refine_palette)
 	st_palette_init = 1;
 }
 
-Uint8 *SDL_XBIOS_ST_DitherRect(_THIS, const Uint8 *src, int x, int y, int w, int h, int pitch)
+static void updateGrayPalette(_THIS, int dither)
 {
-	Uint8 *dither_buffer;
+	extern Uint8 SDL_Atari_C2pPalette4[256];
+	int i;
+
+	for (i = 0; i < 16; ++i) {
+		int value;
+
+		value = i * 17;
+		st_palette_source[i] = value;
+		st_palette[i].r = value;
+		st_palette[i].g = value;
+		st_palette[i].b = value;
+		TT_palette[i] = (ataricomponent(value) << 8)
+			      | (ataricomponent(value) << 4)
+			      | (ataricomponent(value));
+	}
+	Setpalette(TT_palette);
+
+	SDL_memset(st_palette_used, 0, sizeof(st_palette_used));
+	for (i = 0; i < 16; ++i) {
+		st_palette_used[st_palette_source[i]] = 1;
+	}
+	st_map_used_count = 16;
+
+	for (i = 0; i < 256; ++i) {
+		int gray, base, next, frac, phase;
+
+		gray = colorGray(st_colors[i]);
+		base = gray >> 4;
+		if (base > 15) {
+			base = 15;
+		}
+		SDL_Atari_C2pPalette4[i] = base;
+
+		if (!dither) {
+			for (phase = 0; phase < 16; ++phase) {
+				st_dither_map[phase][i] = base;
+			}
+			continue;
+		}
+
+		next = (base < 15) ? (base + 1) : base;
+		frac = gray & 15;
+		for (phase = 0; phase < 16; ++phase) {
+			st_dither_map[phase][i] = (bayer4x4[phase] < frac) ? next : base;
+		}
+	}
+
+	st_palette_init = 1;
+}
+
+void SDL_XBIOS_ST_DitherConvertRect(_THIS, const Uint8 *src, Uint8 *dst, int x, int y, int w, int h, int srcpitch, int dstpitch)
+{
 	int row;
 
 	if ((x < 0) || (y < 0) || (w <= 0) || (h <= 0)) {
-		return (Uint8 *) src;
+		return;
 	}
 	if ((x + w > ST_LOW_WIDTH) || (y + h > ST_LOW_HEIGHT)) {
-		return (Uint8 *) src;
+		return;
 	}
-
-	dither_buffer = (Uint8 *) st_dither_buffer;
+	w &= ~15;
+	if (w <= 0) {
+		return;
+	}
 
 	for (row = 0; row < h; ++row) {
 		const Uint8 *s;
@@ -328,8 +411,8 @@ Uint8 *SDL_XBIOS_ST_DitherRect(_THIS, const Uint8 *src, int x, int y, int w, int
 		const Uint8 *m0, *m1, *m2, *m3;
 		int phase, col;
 
-		s = src + (y + row) * pitch + x;
-		d = dither_buffer + (y + row) * ST_LOW_WIDTH + x;
+		s = src + (y + row) * srcpitch + x;
+		d = dst + (y + row) * dstpitch + (x >> 1);
 		phase = ((y + row) & 3) << 2;
 		col = x & 3;
 		m0 = st_dither_map[phase | col];
@@ -337,39 +420,8 @@ Uint8 *SDL_XBIOS_ST_DitherRect(_THIS, const Uint8 *src, int x, int y, int w, int
 		m2 = st_dither_map[phase | ((col + 2) & 3)];
 		m3 = st_dither_map[phase | ((col + 3) & 3)];
 
-		for (col = w; col >= 8; col -= 8) {
-			d[0] = m0[s[0]];
-			d[1] = m1[s[1]];
-			d[2] = m2[s[2]];
-			d[3] = m3[s[3]];
-			d[4] = m0[s[4]];
-			d[5] = m1[s[5]];
-			d[6] = m2[s[6]];
-			d[7] = m3[s[7]];
-			s += 8;
-			d += 8;
-		}
-		if (col >= 4) {
-			d[0] = m0[s[0]];
-			d[1] = m1[s[1]];
-			d[2] = m2[s[2]];
-			d[3] = m3[s[3]];
-			s += 4;
-			d += 4;
-			col -= 4;
-		}
-		if (col > 0) {
-			d[0] = m0[s[0]];
-			if (col > 1) {
-				d[1] = m1[s[1]];
-				if (col > 2) {
-					d[2] = m2[s[2]];
-				}
-			}
-		}
+		SDL_Atari_C2pConvert4_dither_line(s, d, w, m0, m1, m2, m3);
 	}
-
-	return dither_buffer;
 }
 
 int SDL_XBIOS_ST_ConsumeFullRefresh(_THIS)
@@ -381,8 +433,29 @@ int SDL_XBIOS_ST_ConsumeFullRefresh(_THIS)
 	return refresh;
 }
 
+int SDL_XBIOS_ST_GetRenderMode(void)
+{
+	return st_render_mode;
+}
+
 void SDL_XBIOS_VideoInit_ST(_THIS, unsigned long cookie_cvdo)
 {
+	int i;
+
+	updateRenderMode();
+
+	for (i = 0; i < 256; ++i) {
+		st_colors[i].r = i;
+		st_colors[i].g = i;
+		st_colors[i].b = i;
+		st_colors[i].unused = 0;
+	}
+	st_colors_init = 1;
+
+	updateGrayPalette(this, st_render_mode != ST_RENDER_GRAYSCALE);
+	st_palette_init = 0;
+	st_force_full_refresh = 1;
+
 	XBIOS_listModes = listModes;
 	XBIOS_saveMode = saveMode;
 	XBIOS_setMode = setMode_ST;
@@ -553,6 +626,12 @@ static int setColors(_THIS, int firstcolor, int ncolors, SDL_Color *colors)
 		}
 	}
 	if (!changed) {
+		return(1);
+	}
+
+	if (st_render_mode != ST_RENDER_COLOR_DITHER) {
+		updateGrayPalette(this, st_render_mode == ST_RENDER_GRAYSCALE_DITHER);
+		st_force_full_refresh = 1;
 		return(1);
 	}
 

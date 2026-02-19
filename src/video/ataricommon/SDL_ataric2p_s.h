@@ -76,6 +76,17 @@ void SDL_Atari_C2pConvert4_rect(
 	Uint32 dstpitch		/* Length of one destination line in bytes */
 );
 
+/* Convert one chunky line to 4bpp bitplanes using 4 column-phase maps */
+void SDL_Atari_C2pConvert4_dither_line(
+	const Uint8 *src,	/* Source line start (one byte=one pixel) */
+	Uint8 *dest,		/* Destination line start (4 bit planes) */
+	Uint32 srcwidth,	/* Line width in pixels, multiple of 16 */
+	const Uint8 *map0,	/* Map for x mod 4 = 0 */
+	const Uint8 *map1,	/* Map for x mod 4 = 1 */
+	const Uint8 *map2,	/* Map for x mod 4 = 2 */
+	const Uint8 *map3	/* Map for x mod 4 = 3 */
+);
+
 /*--- Functions ---*/
 
 /* Wrapper for the functions above */

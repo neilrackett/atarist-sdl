@@ -35,6 +35,7 @@
 	.globl	SYM(SDL_Atari_C2pConvert8_rect)
 	.globl	SYM(SDL_Atari_C2pConvert4)
 	.globl	SYM(SDL_Atari_C2pConvert4_rect)
+	.globl	SYM(SDL_Atari_C2pConvert4_dither_line)
 
 	.globl	SYM(SDL_Atari_C2pPalette4)
 
@@ -919,6 +920,157 @@ c2p1x1_4_start:
 	move.l	a5,(a1)+
 	move.l	a6,(a1)+
 
+	movem.l	(sp)+,d2-d7/a2-a6
+#endif
+	rts
+
+| void SDL_Atari_C2pConvert4_dither_line(const byte *pChunky, byte *pScreen, uint32 chunkyWidth, const byte *map0, const byte *map1, const byte *map2, const byte *map3);
+SYM(SDL_Atari_C2pConvert4_dither_line):
+#if !defined(__mcoldfire__)
+	movem.l	d2-d7/a2-a6,-(sp)
+
+#ifdef __FASTCALL__
+									| a0: chunky
+									| a1: screen
+									| d0.l: chunky width
+	move.l	(11*4+4,sp),a2			| map0
+	move.l	(11*4+8,sp),a3			| map1
+	move.l	(11*4+12,sp),a4			| map2
+	move.l	(11*4+16,sp),a5			| map3
+#else
+	move.l	(11*4+4,sp),a0			| chunky
+	move.l	(11*4+8,sp),a1			| screen
+	move.l	(11*4+12,sp),d0			| chunky width
+	move.l	(11*4+16,sp),a2			| map0
+	move.l	(11*4+20,sp),a3			| map1
+	move.l	(11*4+24,sp),a4			| map2
+	move.l	(11*4+28,sp),a5			| map3
+#endif
+
+	lsr.l	#4,d0
+	beq	c2p1x1_4_dither_done
+
+	moveq	#0,d3
+	move.l	#0x33333333,d4
+	move.l	#0x00ff00ff,d5
+	move.l	#0x55555555,d6
+
+c2p1x1_4_dither_pix16:
+	move.l	a0,a6
+	addq.l	#4,a6
+
+	move.b	(a0)+,d3
+	move.b	(a2,d3.l),d1
+	lsl.b	#4,d1
+	move.b	(a6)+,d3
+	or.b	(a2,d3.l),d1
+	lsl.l	#8,d1
+
+	move.b	(a0)+,d3
+	move.b	(a3,d3.l),d1
+	lsl.b	#4,d1
+	move.b	(a6)+,d3
+	or.b	(a3,d3.l),d1
+	lsl.l	#8,d1
+
+	move.b	(a0)+,d3
+	move.b	(a4,d3.l),d1
+	lsl.b	#4,d1
+	move.b	(a6)+,d3
+	or.b	(a4,d3.l),d1
+	lsl.l	#8,d1
+
+	move.b	(a0)+,d3
+	move.b	(a5,d3.l),d1
+	lsl.b	#4,d1
+	move.b	(a6)+,d3
+	or.b	(a5,d3.l),d1
+	addq.l	#4,a0
+	addq.l	#4,a6
+
+	move.b	(a0)+,d3
+	move.b	(a2,d3.l),d2
+	lsl.b	#4,d2
+	move.b	(a6)+,d3
+	or.b	(a2,d3.l),d2
+	lsl.l	#8,d2
+
+	move.b	(a0)+,d3
+	move.b	(a3,d3.l),d2
+	lsl.b	#4,d2
+	move.b	(a6)+,d3
+	or.b	(a3,d3.l),d2
+	lsl.l	#8,d2
+
+	move.b	(a0)+,d3
+	move.b	(a4,d3.l),d2
+	lsl.b	#4,d2
+	move.b	(a6)+,d3
+	or.b	(a4,d3.l),d2
+	lsl.l	#8,d2
+
+	move.b	(a0)+,d3
+	move.b	(a5,d3.l),d2
+	lsl.b	#4,d2
+	move.b	(a6)+,d3
+	or.b	(a5,d3.l),d2
+	addq.l	#4,a0
+
+	| a3a2a1a0e3e2e1e0 b3b2b1b0f3f2f1f0 c3c2c1c0g3g2g1g0 d3d2d1d0h3h2h1h0
+	| i3i2i1i0m3m2m1m0 j3j2j1j0n3n2n1n0 k3k2k1k0o3o2o1o0 l3l2l1l0p3p2p1p0
+
+	move.l	d2,d7
+	lsr.l	#8,d7
+	eor.l	d1,d7
+	and.l	d5,d7
+	eor.l	d7,d1
+	lsl.l	#8,d7
+	eor.l	d7,d2
+
+	| a3a2a1a0e3e2e1e0 i3i2i1i0m3m2m1m0 c3c2c1c0g3g2g1g0 k3k2k1k0o3o2o1o0
+	| b3b2b1b0f3f2f1f0 j3j2j1j0n3n2n1n0 d3d2d1d0h3h2h1h0 l3l2l1l0p3p2p1p0
+
+	move.l	d2,d7
+	lsr.l	#1,d7
+	eor.l	d1,d7
+	and.l	d6,d7
+	eor.l	d7,d1
+	add.l	d7,d7
+	eor.l	d7,d2
+
+	| a3b3a1b1e3f3e1f1 i3j3i1j1m3n3m1n1 c3d3c1d1g3h3g1h1 k3l3k1l1o3p3o1p1
+	| a2b2a0b0e2f2e0f0 i2j2i0j0m2n2m0n0 c2d2c0d0g2h2g0h0 k2l2k0l0o2p2o0p0
+
+	move.w	d2,d7
+	move.w	d1,d2
+	swap	d2
+	move.w	d2,d1
+	move.w	d7,d2
+
+	| a3b3a1b1e3f3e1f1 i3j3i1j1m3n3m1n1 a2b2a0b0e2f2e0f0 i2j2i0j0m2n2m0n0
+	| c3d3c1d1g3h3g1h1 k3l3k1l1o3p3o1p1 c2d2c0d0g2h2g0h0 k2l2k0l0o2p2o0p0
+
+	move.l	d2,d7
+	lsr.l	#2,d7
+	eor.l	d1,d7
+	and.l	d4,d7
+	eor.l	d7,d1
+	lsl.l	#2,d7
+	eor.l	d7,d2
+
+	| a3b3c3d3e3f3g3h3 i3j3k3l3m3n3o3p3 a2b2c2d2e2f2g2h2 i2j2k2l2m2n2o2p2
+	| a1b1c1d1e1f1g1h1 i1j1k1l1m1n1o1p1 a0b0c0d0e0f0g0h0 i0j0k0l0m0n0o0p0
+
+	swap	d1
+	swap	d2
+
+	move.l	d2,(a1)+
+	move.l	d1,(a1)+
+
+	subq.l	#1,d0
+	bne	c2p1x1_4_dither_pix16
+
+c2p1x1_4_dither_done:
 	movem.l	(sp)+,d2-d7/a2-a6
 #endif
 	rts

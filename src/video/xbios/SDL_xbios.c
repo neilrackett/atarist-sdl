@@ -96,6 +96,86 @@ static SDL_bool shadow_warning_shown;
 /* Xbios driver bootstrap functions */
 
 static long cookie_vdo, cookie_nova;
+static int ste_blitter_available = -1;
+
+static int XBIOS_ST_HasBlitter(void)
+{
+	if (ste_blitter_available < 0) {
+		ste_blitter_available = (Blitmode(-1) & 1) ? 1 : 0;
+	}
+
+	return ste_blitter_available;
+}
+
+static void XBIOS_ST_CopyRect(Uint8 *src_base, Uint8 *dst_base, int srcpitch, int dstpitch, int x, int y, int w, int h)
+{
+	volatile Uint16 * const blt_src_xinc = (volatile Uint16 *) 0xFF8A20;
+	volatile Uint16 * const blt_src_yinc = (volatile Uint16 *) 0xFF8A22;
+	volatile Uint32 * const blt_src_addr = (volatile Uint32 *) 0xFF8A24;
+	volatile Uint16 * const blt_endmask1 = (volatile Uint16 *) 0xFF8A28;
+	volatile Uint16 * const blt_endmask2 = (volatile Uint16 *) 0xFF8A2A;
+	volatile Uint16 * const blt_endmask3 = (volatile Uint16 *) 0xFF8A2C;
+	volatile Uint16 * const blt_dst_xinc = (volatile Uint16 *) 0xFF8A2E;
+	volatile Uint16 * const blt_dst_yinc = (volatile Uint16 *) 0xFF8A30;
+	volatile Uint32 * const blt_dst_addr = (volatile Uint32 *) 0xFF8A32;
+	volatile Uint16 * const blt_xcount = (volatile Uint16 *) 0xFF8A36;
+	volatile Uint16 * const blt_ycount = (volatile Uint16 *) 0xFF8A38;
+	volatile Uint8 * const blt_hop = (volatile Uint8 *) 0xFF8A3A;
+	volatile Uint8 * const blt_op = (volatile Uint8 *) 0xFF8A3B;
+	volatile Uint8 * const blt_ctrl = (volatile Uint8 *) 0xFF8A3C;
+	volatile Uint8 * const blt_skew = (volatile Uint8 *) 0xFF8A3D;
+	Uint8 *src;
+	Uint8 *dst;
+	int bytes;
+	int words;
+	int row;
+
+	if ((x < 0) || (y < 0) || (w <= 0) || (h <= 0)) {
+		return;
+	}
+
+	bytes = w >> 1;
+	words = bytes >> 1;
+	if (words <= 0) {
+		return;
+	}
+
+	src = src_base + y * srcpitch + (x >> 1);
+	dst = dst_base + y * dstpitch + (x >> 1);
+
+	/* Fallback when geometry is not blitter friendly. */
+	if ((((long) src | (long) dst | bytes | srcpitch | dstpitch) & 1) != 0 ||
+	    (srcpitch < bytes) || (dstpitch < bytes)) {
+		for (row = 0; row < h; ++row) {
+			SDL_memcpy(dst, src, bytes);
+			src += srcpitch;
+			dst += dstpitch;
+		}
+		return;
+	}
+
+	while ((*blt_ctrl) & 0x80) {
+	}
+
+	*blt_src_xinc = 2;
+	*blt_src_yinc = srcpitch - bytes;
+	*blt_src_addr = (Uint32) src;
+	*blt_endmask1 = 0xffff;
+	*blt_endmask2 = 0xffff;
+	*blt_endmask3 = 0xffff;
+	*blt_dst_xinc = 2;
+	*blt_dst_yinc = dstpitch - bytes;
+	*blt_dst_addr = (Uint32) dst;
+	*blt_xcount = words;
+	*blt_ycount = h;
+	*blt_hop = 2;	/* source */
+	*blt_op = 3;	/* source */
+	*blt_skew = 0;
+	*blt_ctrl = 0xc0;	/* start */
+
+	while ((*blt_ctrl) & 0x80) {
+	}
+}
 
 static int XBIOS_Available(void)
 {
@@ -606,26 +686,39 @@ static void XBIOS_UpdateRects(_THIS, int numrects, SDL_Rect *rects)
 	 */
 	int src_offset = (surface->locked ? -surface->offset : 0);
 	int i;
+	int did_full_refresh;
+	int doubleline;
+	int use_st_dither;
+
+	did_full_refresh = 0;
+	doubleline = 0;
+	use_st_dither = 0;
 
 	if (XBIOS_current->flags & XBIOSMODE_C2P) {
-		const int doubleline = (XBIOS_current->flags & XBIOSMODE_DOUBLELINE ? 1 : 0);
-		const int use_st_dither = (XBIOS_current->depth == 4) && (XBIOS_current->number == (ST_LOW >> 8));
+		const int st_render_mode = SDL_XBIOS_ST_GetRenderMode();
+
+		doubleline = (XBIOS_current->flags & XBIOSMODE_DOUBLELINE ? 1 : 0);
+		use_st_dither = (XBIOS_current->depth == 4) && (XBIOS_current->number == (ST_LOW >> 8)) && (st_render_mode != 0);
 		c2p_source = surface->pixels + src_offset;
 
+#ifndef DEBUG_VIDEO_XBIOS
+		/* In single-buffer mode, align C2P writes to retrace to reduce tearing */
+		if ((surface->flags & SDL_DOUBLEBUF) != SDL_DOUBLEBUF) {
+			(*XBIOS_vsync)(this);
+		}
+#endif
+
 		if (use_st_dither && SDL_XBIOS_ST_ConsumeFullRefresh(this)) {
-			c2p_source = SDL_XBIOS_ST_DitherRect(
-				this, surface->pixels + src_offset,
+			SDL_XBIOS_ST_DitherConvertRect(
+				this,
+				surface->pixels + src_offset,
+				XBIOS_screens[XBIOS_fbnum],
 				0, 0,
 				surface->w, surface->h,
-				surface->pitch
+				surface->pitch,
+				XBIOS_pitch << doubleline
 			);
-			SDL_Atari_C2pConvert(
-				c2p_source, XBIOS_screens[XBIOS_fbnum],
-				0, 0,
-				surface->w, surface->h,
-				doubleline, XBIOS_current->depth,
-				surface->pitch, XBIOS_pitch
-			);
+			did_full_refresh = 1;
 			numrects = 0;
 		}
 
@@ -639,31 +732,34 @@ static void XBIOS_UpdateRects(_THIS, int numrects, SDL_Rect *rects)
 			}
 
 			if (use_st_dither) {
-				c2p_source = SDL_XBIOS_ST_DitherRect(
-					this, surface->pixels + src_offset,
+				SDL_XBIOS_ST_DitherConvertRect(
+					this,
+					surface->pixels + src_offset,
+					XBIOS_screens[XBIOS_fbnum],
 					x1, rects[i].y,
 					x2-x1, rects[i].h,
-					surface->pitch
+					surface->pitch,
+					XBIOS_pitch << doubleline
+				);
+			} else {
+				/* Convert chunky to planar screen */
+				SDL_Atari_C2pConvert(
+					c2p_source, XBIOS_screens[XBIOS_fbnum],
+					x1, rects[i].y,
+					x2-x1, rects[i].h,
+					doubleline, XBIOS_current->depth,
+					surface->pitch, XBIOS_pitch
 				);
 			}
-
-			/* Convert chunky to planar screen */
-			SDL_Atari_C2pConvert(
-				c2p_source, XBIOS_screens[XBIOS_fbnum],
-				x1, rects[i].y,
-				x2-x1, rects[i].h,
-				doubleline, XBIOS_current->depth,
-				surface->pitch, XBIOS_pitch
-			);
 		}
 	}
 
 	if ((surface->flags & SDL_DOUBLEBUF) == SDL_DOUBLEBUF) {
 #ifndef DEBUG_VIDEO_XBIOS
 		if ((cookie_vdo >> 16) != VDO_F30) {
-			(*XBIOS_swapVbuffers)(this);
-
 			(*XBIOS_vsync)(this);
+
+			(*XBIOS_swapVbuffers)(this);
 		} else {
 			/* Make sure that the Videl registers are updated during vertical retrace */
 			(*XBIOS_vsync)(this);
@@ -673,6 +769,37 @@ static void XBIOS_UpdateRects(_THIS, int numrects, SDL_Rect *rects)
 #endif
 
 		XBIOS_fbnum ^= 1;
+		if (use_st_dither && XBIOS_ST_HasBlitter()) {
+			if (did_full_refresh) {
+				XBIOS_ST_CopyRect(
+					XBIOS_screens[XBIOS_fbnum ^ 1],
+					XBIOS_screens[XBIOS_fbnum],
+					XBIOS_pitch << doubleline,
+					XBIOS_pitch << doubleline,
+					0, 0,
+					surface->w, surface->h
+				);
+			} else {
+				for (i = 0; i < numrects; ++i) {
+					int x1, x2;
+
+					x1 = rects[i].x & ~15;
+					x2 = rects[i].x + rects[i].w;
+					if (x2 & 15) {
+						x2 = (x2 | 15) +1;
+					}
+
+					XBIOS_ST_CopyRect(
+						XBIOS_screens[XBIOS_fbnum ^ 1],
+						XBIOS_screens[XBIOS_fbnum],
+						XBIOS_pitch << doubleline,
+						XBIOS_pitch << doubleline,
+						x1, rects[i].y,
+						x2 - x1, rects[i].h
+					);
+				}
+			}
+		}
 		if (!XBIOS_shadowscreen) {
 			src_offset = (surface->locked ? surface->offset : 0);
 			surface->pixels=((Uint8 *) XBIOS_screens[XBIOS_fbnum]) + src_offset;
@@ -686,6 +813,16 @@ static int XBIOS_FlipHWSurface(_THIS, SDL_Surface *surface)
 	int src_offset = (surface->locked ? 0 : surface->offset);
 	int dst_offset;
 	Uint8 *c2p_source;
+	int doubleline;
+	int use_st_dither;
+	int copy_x, copy_y, copy_w, copy_h;
+
+	doubleline = 0;
+	use_st_dither = 0;
+	copy_x = 0;
+	copy_y = 0;
+	copy_w = surface->w;
+	copy_h = surface->h;
 
 	if (this->shadow && !shadow_warning_shown) {
 		fprintf(stderr, "Warning: shadow buffer in use due to SDL_SetVideoMode(SDL_SWSURFACE)\n");
@@ -693,37 +830,48 @@ static int XBIOS_FlipHWSurface(_THIS, SDL_Surface *surface)
 	}
 
 	if (XBIOS_current->flags & XBIOSMODE_C2P) {
-		const int doubleline = (XBIOS_current->flags & XBIOSMODE_DOUBLELINE ? 1 : 0);
-		const int use_st_dither = (XBIOS_current->depth == 4) && (XBIOS_current->number == (ST_LOW >> 8));
+		const int st_render_mode = SDL_XBIOS_ST_GetRenderMode();
+
+		doubleline = (XBIOS_current->flags & XBIOSMODE_DOUBLELINE ? 1 : 0);
+		use_st_dither = (XBIOS_current->depth == 4) && (XBIOS_current->number == (ST_LOW >> 8)) && (st_render_mode != 0);
 
 		dst_offset = this->offset_y * (XBIOS_pitch << doubleline) +
 				(this->offset_x & ~15) * XBIOS_current->depth / 8;
 		c2p_source = surface->pixels + src_offset;
+		copy_x = this->offset_x & ~15;
+		copy_y = this->offset_y;
+		copy_w = surface->w;
+		if (copy_w & 15) {
+			copy_w = (copy_w | 15) + 1;
+		}
+		copy_h = surface->h;
 		if (use_st_dither) {
-			c2p_source = SDL_XBIOS_ST_DitherRect(
+			SDL_XBIOS_ST_DitherConvertRect(
 				this, surface->pixels + src_offset,
+				((Uint8 *)XBIOS_screens[XBIOS_fbnum]) + dst_offset,
 				0, 0,
 				surface->w, surface->h,
-				surface->pitch
+				surface->pitch,
+				XBIOS_pitch << doubleline
+			);
+		} else {
+			/* Convert chunky to planar screen */
+			SDL_Atari_C2pConvert(
+				c2p_source, ((Uint8 *)XBIOS_screens[XBIOS_fbnum]) + dst_offset,
+				0, 0,
+				surface->w, surface->h,
+				doubleline, XBIOS_current->depth,
+				surface->pitch, XBIOS_pitch
 			);
 		}
-
-		/* Convert chunky to planar screen */
-		SDL_Atari_C2pConvert(
-			c2p_source, ((Uint8 *)XBIOS_screens[XBIOS_fbnum]) + dst_offset,
-			0, 0,
-			surface->w, surface->h,
-			doubleline, XBIOS_current->depth,
-			surface->pitch, XBIOS_pitch
-		);
 	}
 
 	if ((surface->flags & SDL_DOUBLEBUF) == SDL_DOUBLEBUF) {
 #ifndef DEBUG_VIDEO_XBIOS
 		if ((cookie_vdo >> 16) != VDO_F30) {
-			(*XBIOS_swapVbuffers)(this);
-
 			(*XBIOS_vsync)(this);
+
+			(*XBIOS_swapVbuffers)(this);
 		} else {
 			/* Make sure that the Videl registers are updated during vertical retrace */
 			(*XBIOS_vsync)(this);
@@ -733,6 +881,15 @@ static int XBIOS_FlipHWSurface(_THIS, SDL_Surface *surface)
 #endif
 
 		XBIOS_fbnum ^= 1;
+		if (use_st_dither && XBIOS_ST_HasBlitter()) {
+			XBIOS_ST_CopyRect(
+				XBIOS_screens[XBIOS_fbnum ^ 1],
+				XBIOS_screens[XBIOS_fbnum],
+				XBIOS_pitch << doubleline,
+				XBIOS_pitch << doubleline,
+				copy_x, copy_y, copy_w, copy_h
+			);
+		}
 		if (!XBIOS_shadowscreen) {
 			src_offset = (surface->locked ? surface->offset : 0);
 			surface->pixels=((Uint8 *) XBIOS_screens[XBIOS_fbnum]) + src_offset;

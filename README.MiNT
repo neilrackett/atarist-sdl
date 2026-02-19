@@ -62,11 +62,11 @@ OpenGL (using Mesa offscreen rendering driver)
 
 Audio   O/S     Misc
 dma8    All     Uses MFP Timer A interrupt
-xbios	TOS     Uses MFP Timer A interrupt
+xbios		TOS     Uses MFP Timer A interrupt
 xbios   MiNT    Uses MFP Timer A interrupt
 xbios   Magic   Uses MFP Timer A interrupt
 stfa    All     Uses MFP interrupt
-mcsn	TOS     Uses MFP Timer A interrupt
+mcsn		TOS     Uses MFP Timer A interrupt
 mcsn    MiNT    Uses MiNT thread
 mcsn    Magic   Disabled
 gsxb    All     Uses GSXB callback
@@ -92,6 +92,13 @@ SDL_VIDEO_GL_DRIVER:
 SDL_VIDEO_ALIGNED_WINDOWS:
 	Set to force aligning of the window's x coordinate to a 16-pixel boundary
 	(e.g. for speed reasons)
+
+SDL_XBIOS_ST_RENDER_MODE:
+	Selects ST low-res (320x200x4) XBIOS rendering mode:
+
+	Set to '0' for grayscale
+	Set to '1' for grayscale+dither
+	Set to '2' for color+dither (default)
 
 SDL_AUDIODRIVER:
 	Set to 'mint_gsxb' to force Atari GSXB audio driver
@@ -170,8 +177,8 @@ Xbios video:
 	them.
 
 	ST, STE, Mega ST, Mega STE:
-		320x200x4 bits, shades of grey, available only for the purpose of
-		testing SDL.
+		Emulates 320x200x8 using 320x200x4 bits with greyscale, greyscale
+		with dither or color with dither based on SDL_XBIOS_ST_RENDER_MODE.
 	TT:
 		320x480x8 and 320x240x8 (software double-lined mode).
 	Falcon:
