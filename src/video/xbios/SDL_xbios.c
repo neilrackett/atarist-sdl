@@ -114,10 +114,21 @@ typedef struct {
 #define XBIOS_ST_MAX_SPANS_PER_ROW (XBIOS_ST_LOW_WIDTH / XBIOS_ST_TILE_WIDTH)
 
 /* These are balanced defaults; use 100/0/0/0 for best FPS at expense of likely tearing and artifacts */
+#ifndef XBIOS_ST_DEFAULT_FULL_REFRESH_PCT
 #define XBIOS_ST_DEFAULT_FULL_REFRESH_PCT 60
+#endif
+#ifndef XBIOS_ST_COPYBACK_SKIP_PCT
 #define XBIOS_ST_COPYBACK_SKIP_PCT 85
+#endif
+#ifndef XBIOS_ST_DEFAULT_SINGLEBUF_VSYNC
 #define XBIOS_ST_DEFAULT_SINGLEBUF_VSYNC 2
+#endif
+#ifndef XBIOS_ST_ADAPTIVE_VSYNC_PCT
 #define XBIOS_ST_ADAPTIVE_VSYNC_PCT 25
+#endif
+
+static int xbios_st_full_refresh_threshold_pct = XBIOS_ST_DEFAULT_FULL_REFRESH_PCT;
+static int xbios_st_singlebuf_vsync_mode = XBIOS_ST_DEFAULT_SINGLEBUF_VSYNC;
 
 static int XBIOS_ST_ParseEnvInt(const char *name, int default_value, int min_value, int max_value)
 {
@@ -139,14 +150,14 @@ static int XBIOS_ST_ParseEnvInt(const char *name, int default_value, int min_val
 	return value;
 }
 
-static void XBIOS_ST_LoadPerfHints(int *full_refresh_threshold_pct, int *singlebuf_vsync_mode)
+static void XBIOS_ST_LoadPerfHints(void)
 {
-	*full_refresh_threshold_pct = XBIOS_ST_ParseEnvInt(
+	xbios_st_full_refresh_threshold_pct = XBIOS_ST_ParseEnvInt(
 		"SDL_XBIOS_ST_FULL_REFRESH_PCT",
 		XBIOS_ST_DEFAULT_FULL_REFRESH_PCT,
 		0, 100
 	);
-	*singlebuf_vsync_mode = XBIOS_ST_ParseEnvInt(
+	xbios_st_singlebuf_vsync_mode = XBIOS_ST_ParseEnvInt(
 		"SDL_XBIOS_ST_SINGLEBUF_VSYNC",
 		XBIOS_ST_DEFAULT_SINGLEBUF_VSYNC,
 		0, 2
@@ -681,6 +692,7 @@ static int XBIOS_VideoInit(_THIS, SDL_PixelFormat *vformat)
 	GEM_CommonSavePalette(this);
 
 	GEM_LockScreen(this, SDL_TRUE);
+	XBIOS_ST_LoadPerfHints();
 
 	/* Initialize all variables that we clean on shutdown */
 	for ( i=0; i<NUM_MODELISTS; ++i ) {
@@ -974,8 +986,6 @@ static void XBIOS_UpdateRects(_THIS, int numrects, SDL_Rect *rects)
 	int force_full_refresh;
 	int dirty_area;
 	int total_area;
-	int full_refresh_threshold_pct;
-	int singlebuf_vsync_mode;
 	xbiosstrect_t merged_rects[XBIOS_ST_MAX_BATCHED_RECTS];
 
 	did_full_refresh = 0;
@@ -986,9 +996,6 @@ static void XBIOS_UpdateRects(_THIS, int numrects, SDL_Rect *rects)
 	force_full_refresh = 0;
 	dirty_area = 0;
 	total_area = surface->w * surface->h;
-	full_refresh_threshold_pct = XBIOS_ST_DEFAULT_FULL_REFRESH_PCT;
-	singlebuf_vsync_mode = XBIOS_ST_DEFAULT_SINGLEBUF_VSYNC;
-	XBIOS_ST_LoadPerfHints(&full_refresh_threshold_pct, &singlebuf_vsync_mode);
 
 	if (XBIOS_current->flags & XBIOSMODE_C2P) {
 		SDL_XBIOS_ST_SyncRenderMode(this);
@@ -1037,7 +1044,7 @@ static void XBIOS_UpdateRects(_THIS, int numrects, SDL_Rect *rects)
 		if (use_st_dither) {
 			force_full_refresh |= SDL_XBIOS_ST_ConsumeFullRefresh(this);
 			if (!force_full_refresh && (dirty_area > 0) &&
-			    XBIOS_ST_ShouldFullRefresh(dirty_area, total_area, full_refresh_threshold_pct)) {
+			    XBIOS_ST_ShouldFullRefresh(dirty_area, total_area, xbios_st_full_refresh_threshold_pct)) {
 				force_full_refresh = 1;
 			}
 		}
@@ -1045,7 +1052,7 @@ static void XBIOS_UpdateRects(_THIS, int numrects, SDL_Rect *rects)
 	#ifndef DEBUG_VIDEO_XBIOS
 		/* In single-buffer mode, align C2P writes to retrace to reduce tearing */
 		if ((surface->flags & SDL_DOUBLEBUF) != SDL_DOUBLEBUF) {
-			if (XBIOS_ST_ShouldSingleBufVsync(is_st_low4, dirty_area, total_area, singlebuf_vsync_mode)) {
+			if (XBIOS_ST_ShouldSingleBufVsync(is_st_low4, dirty_area, total_area, xbios_st_singlebuf_vsync_mode)) {
 				(*XBIOS_vsync)(this);
 			}
 		}

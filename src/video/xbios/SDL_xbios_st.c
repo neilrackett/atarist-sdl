@@ -50,6 +50,10 @@ static const xbiosmode_t stmodes[]={
 #define ST_LOW_HEIGHT 200
 #define ST_REMAP_CHANGE_THRESHOLD 192
 
+#ifndef SDL_XBIOS_ST_RENDER_MODE
+#define SDL_XBIOS_ST_RENDER_MODE "color"
+#endif
+
 static const char ST_RENDER_GRAYSCALE[] = "grayscale";
 static const char ST_RENDER_COLOR[] = "color";
 
@@ -84,7 +88,6 @@ static int allocVbuffers(_THIS, const xbiosmode_t *new_video_mode, int num_buffe
 static void freeVbuffers(_THIS);
 static int setColors(_THIS, int firstcolor, int ncolors, SDL_Color *colors);
 static void updateGrayPalette(_THIS);
-static void updateRenderMode(void);
 
 static __inline__ int colorDist(SDL_Color c1, SDL_Color c2)
 {
@@ -113,27 +116,6 @@ static __inline__ int colorGray(SDL_Color color)
 static __inline__ Uint32 colorKey(SDL_Color color)
 {
 	return ((Uint32)color.r << 16) | ((Uint32)color.g << 8) | (Uint32)color.b;
-}
-
-/**
- * Enables render mode to be changed mid-flight
- * Useful mainly for benchmarking
- */
-static void updateRenderMode(void)
-{
-	const char *envr;
-
-	st_render_mode = ST_RENDER_COLOR;
-	envr = SDL_getenv("SDL_XBIOS_ST_RENDER_MODE");
-	if (envr == NULL) {
-		return;
-	}
-
-	if (SDL_strcasecmp(envr, ST_RENDER_GRAYSCALE) == 0) {
-		st_render_mode = ST_RENDER_GRAYSCALE;
-	} else if (SDL_strcasecmp(envr, ST_RENDER_COLOR) == 0) {
-		st_render_mode = ST_RENDER_COLOR;
-	}
 }
 
 static int isUniformPalette(SDL_Color *colors, int ncolors)
@@ -498,27 +480,24 @@ int SDL_XBIOS_ST_GetRenderMode(void)
 
 void SDL_XBIOS_ST_SyncRenderMode(_THIS)
 {
-	const char *old_mode;
-
-	old_mode = st_render_mode;
-	updateRenderMode();
-	if (st_render_mode == old_mode) {
-		return;
-	}
-
-	if (st_render_mode != ST_RENDER_COLOR) {
-		updateGrayPalette(this);
-	} else {
-		updatePalette(this, 1);
-	}
-	st_force_full_refresh = 1;
+	/* Render mode is now init-time only; no mid-flight env polling. */
+	(void)this;
 }
 
 void SDL_XBIOS_VideoInit_ST(_THIS, unsigned long cookie_cvdo)
 {
+	const char *mode;
 	int i;
 
-	updateRenderMode();
+	mode = SDL_getenv("SDL_XBIOS_ST_RENDER_MODE");
+	if (mode == NULL || *mode == '\0') {
+		mode = SDL_XBIOS_ST_RENDER_MODE;
+	}
+	if (SDL_strcasecmp(mode, ST_RENDER_GRAYSCALE) == 0) {
+		st_render_mode = ST_RENDER_GRAYSCALE;
+	} else {
+		st_render_mode = ST_RENDER_COLOR;
+	}
 
 	for (i = 0; i < 256; ++i) {
 		st_colors[i].r = i;
