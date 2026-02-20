@@ -134,7 +134,7 @@ void SDL_XBIOS_VideoInit_ST(_THIS, unsigned long cookie_cvdo)
 
 	SDL_XBIOS_ST_InitColorTable();
 	SDL_XBIOS_ST_UpdateGrayPalette(this);
-	if (SDL_XBIOS_ST_IsColorRenderMode()) {
+	if (SDL_XBIOS_ST_IS_COLOR_RENDER_MODE()) {
 		st_palette_init = 0;
 	}
 	st_force_full_refresh = 1;

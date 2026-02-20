@@ -56,6 +56,7 @@
 extern const char ST_RENDER_GRAYSCALE[];
 extern const char ST_RENDER_COLOR[];
 extern const Uint8 bayer4x4[16];
+#define SDL_XBIOS_ST_IS_COLOR_RENDER_MODE() (st_render_mode == ST_RENDER_COLOR)
 
 typedef struct {
 	int x1;
@@ -93,7 +94,6 @@ extern int xbios_st_singlebuf_vsync_mode;
 void SDL_XBIOS_ST_InitColorTable(void);
 void SDL_XBIOS_ST_UpdateGrayPalette(_THIS);
 int SDL_XBIOS_ST_SetColors(_THIS, int firstcolor, int ncolors, SDL_Color *colors);
-int SDL_XBIOS_ST_IsColorRenderMode(void);
 
 void SDL_XBIOS_ST_UpdateRects(_THIS, int numrects, SDL_Rect *rects);
 int SDL_XBIOS_ST_FlipHWSurface(_THIS, SDL_Surface *surface);

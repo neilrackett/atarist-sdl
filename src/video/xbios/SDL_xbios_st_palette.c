@@ -31,13 +31,13 @@
 #include "../ataricommon/SDL_ataric2p_s.h"
 #include "SDL_xbios_st_int.h"
 
-static __inline__ int colorDist(SDL_Color c1, SDL_Color c2)
+static __inline__ int colorDist(const SDL_Color *c1, const SDL_Color *c2)
 {
 	int dr, dg, db;
 
-	dr = (int)c1.r - (int)c2.r;
-	dg = (int)c1.g - (int)c2.g;
-	db = (int)c1.b - (int)c2.b;
+	dr = (int)c1->r - (int)c2->r;
+	dg = (int)c1->g - (int)c2->g;
+	db = (int)c1->b - (int)c2->b;
 	return (dr * dr) + (dg * dg) + (db * db);
 }
 
@@ -95,7 +95,7 @@ static void updatePalette(_THIS, int refine_palette)
 		if (refine_palette) {
 			nearest[i] = 0;
 		}
-		min_dist[i] = colorDist(st_colors[i], palette[0]);
+		min_dist[i] = colorDist(&st_colors[i], &palette[0]);
 	}
 	for (k = 1; k < 16; ++k) {
 		int best = 0;
@@ -112,7 +112,7 @@ static void updatePalette(_THIS, int refine_palette)
 		for (i = 0; i < 256; ++i) {
 			int dist;
 
-			dist = colorDist(st_colors[i], palette[k]);
+			dist = colorDist(&st_colors[i], &palette[k]);
 			if (dist < min_dist[i]) {
 				min_dist[i] = dist;
 				if (refine_palette) {
@@ -154,6 +154,7 @@ static void updatePalette(_THIS, int refine_palette)
 	}
 	st_map_used_count = 0;
 	for (i = 0; i < 256; ++i) {
+		const SDL_Color *color;
 		int j;
 		int best, second;
 		int best_dist, second_dist;
@@ -161,14 +162,15 @@ static void updatePalette(_THIS, int refine_palette)
 		Uint8 best_u8, second_u8;
 		int phase;
 
+		color = &st_colors[i];
 		best = 0;
 		second = 0;
-		best_dist = colorDist(st_colors[i], palette[0]);
+		best_dist = colorDist(color, &palette[0]);
 		second_dist = best_dist;
 		for (j = 1; j < 16; ++j) {
 			int dist;
 
-			dist = colorDist(st_colors[i], palette[j]);
+			dist = colorDist(color, &palette[j]);
 			if (dist < best_dist) {
 				second = best;
 				second_dist = best_dist;
@@ -293,11 +295,6 @@ void SDL_XBIOS_ST_InitColorTable(void)
 	initDitherPhaseMaps();
 }
 
-int SDL_XBIOS_ST_IsColorRenderMode(void)
-{
-	return (st_render_mode == ST_RENDER_COLOR);
-}
-
 int SDL_XBIOS_ST_SetColors(_THIS, int firstcolor, int ncolors, SDL_Color *colors)
 {
 	enum {
@@ -331,7 +328,7 @@ int SDL_XBIOS_ST_SetColors(_THIS, int firstcolor, int ncolors, SDL_Color *colors
 		return (1);
 	}
 
-	if (!SDL_XBIOS_ST_IsColorRenderMode()) {
+	if (!SDL_XBIOS_ST_IS_COLOR_RENDER_MODE()) {
 		extern Uint8 SDL_Atari_C2pPalette4[256];
 		Uint8 *map;
 

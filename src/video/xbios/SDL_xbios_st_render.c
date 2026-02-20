@@ -122,7 +122,7 @@ static int initConvertState(_THIS, SDL_Surface *surface, int src_offset, stconve
 	state->dstpitch = XBIOS_pitch << state->doubleline;
 	state->depth = XBIOS_current->depth;
 	state->is_lowres = isStLow4Mode(this);
-	state->use_dither = state->is_lowres && SDL_XBIOS_ST_IsColorRenderMode();
+	state->use_dither = state->is_lowres && SDL_XBIOS_ST_IS_COLOR_RENDER_MODE();
 	state->src = surface->pixels + src_offset;
 	state->srcpitch = surface->pitch;
 	return 1;
