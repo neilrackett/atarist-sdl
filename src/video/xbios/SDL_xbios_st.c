@@ -84,11 +84,11 @@ static const Uint8 bayer4x4[16]={
 
 static SDL_Color st_colors[256];
 static int st_colors_init = 0;
-static SDL_Color st_palette[16];
 static int st_palette_init = 0;
 static Uint8 st_palette_source[16];
 static Uint8 st_palette_used[256];
 static Uint8 st_dither_map[16][256];
+static const Uint8 *st_dither_phase_maps[4][16];
 static SDL_bool st_shadow_warning_shown;
 static int st_force_full_refresh = 1;
 static int st_map_used_count = 0;
@@ -120,6 +120,7 @@ static void updateGrayPalette(_THIS);
 static void updateRects_ST(_THIS, int numrects, SDL_Rect *rects);
 static int flipHWSurface_ST(_THIS, SDL_Surface *surface);
 static void initColorTable(void);
+static void initDitherPhaseMaps(void);
 static void maybeWarnShadowBuffer(_THIS);
 static int isColorRenderMode(void);
 static int isStLow4Mode(_THIS);
@@ -157,7 +158,7 @@ static __inline__ Uint32 colorKey(SDL_Color color)
 	return ((Uint32)color.r << 16) | ((Uint32)color.g << 8) | (Uint32)color.b;
 }
 
-static int isUniformPalette(SDL_Color *colors, int ncolors)
+static int isUniformPalette(const SDL_Color *colors, int ncolors)
 {
 	int i;
 	Uint8 r, g, b;
@@ -217,7 +218,7 @@ static int updatePaletteExact(_THIS)
 {
 	extern Uint8 SDL_Atari_C2pPalette4[256];
 	Uint32 exact_key[16];
-	int exact_source[16];
+	Uint8 exact_source[16];
 	int exact_count;
 	int i, j;
 
@@ -248,15 +249,12 @@ static int updatePaletteExact(_THIS)
 
 		src = (i < exact_count) ? exact_source[i] : exact_source[0];
 		st_palette_source[i] = src;
-		st_palette[i] = st_colors[src];
 		if (i < exact_count) {
 			st_palette_used[src] = 1;
 		}
 	}
 
-	for (i = 0; i < 256; ++i) {
-		st_dither_map[0][i] = SDL_Atari_C2pPalette4[i];
-	}
+	SDL_memcpy(st_dither_map[0], SDL_Atari_C2pPalette4, sizeof(st_dither_map[0]));
 	for (i = 1; i < 16; ++i) {
 		SDL_memcpy(st_dither_map[i], st_dither_map[0], sizeof(st_dither_map[0]));
 	}
@@ -269,16 +267,14 @@ static int updatePaletteExact(_THIS)
 static void updatePalette(_THIS, int refine_palette)
 {
 	extern Uint8 SDL_Atari_C2pPalette4[256];
+	SDL_Color palette[16];
 	Uint32 sumr[16], sumg[16], sumb[16];
-	int count[16];
-	int nearest[256];
+	Uint16 count[16];
+	Uint8 nearest[256];
 	int min_dist[256];
-	int second_choice[256];
-	int spread_choice[256];
-	int inverse_map[16];
+	Uint8 inverse_map[16];
 	int inverse_dist[16];
-	int inverse_found[16];
-	int map_used[16];
+	Uint8 inverse_found[16];
 	int i, k;
 
 	if (updatePaletteExact(this)) {
@@ -286,10 +282,12 @@ static void updatePalette(_THIS, int refine_palette)
 	}
 
 	/* Pick a small representative palette. */
-	st_palette[0] = st_colors[0];
+	palette[0] = st_colors[0];
 	for (i = 0; i < 256; ++i) {
-		nearest[i] = 0;
-		min_dist[i] = colorDist(st_colors[i], st_palette[0]);
+		if (refine_palette) {
+			nearest[i] = 0;
+		}
+		min_dist[i] = colorDist(st_colors[i], palette[0]);
 	}
 	for (k = 1; k < 16; ++k) {
 		int best = 0;
@@ -302,14 +300,16 @@ static void updatePalette(_THIS, int refine_palette)
 			}
 		}
 
-		st_palette[k] = st_colors[best];
+		palette[k] = st_colors[best];
 		for (i = 0; i < 256; ++i) {
 			int dist;
 
-			dist = colorDist(st_colors[i], st_palette[k]);
+			dist = colorDist(st_colors[i], palette[k]);
 			if (dist < min_dist[i]) {
 				min_dist[i] = dist;
-				nearest[i] = k;
+				if (refine_palette) {
+					nearest[i] = k;
+				}
 			}
 		}
 	}
@@ -333,9 +333,9 @@ static void updatePalette(_THIS, int refine_palette)
 		}
 		for (i = 0; i < 16; ++i) {
 			if (count[i] > 0) {
-				st_palette[i].r = (Uint8)(sumr[i] / count[i]);
-				st_palette[i].g = (Uint8)(sumg[i] / count[i]);
-				st_palette[i].b = (Uint8)(sumb[i] / count[i]);
+				palette[i].r = (Uint8)(sumr[i] / count[i]);
+				palette[i].g = (Uint8)(sumg[i] / count[i]);
+				palette[i].b = (Uint8)(sumb[i] / count[i]);
 			}
 		}
 	}
@@ -345,22 +345,24 @@ static void updatePalette(_THIS, int refine_palette)
 		inverse_map[i] = i;
 		inverse_dist[i] = 0x7fffffff;
 		inverse_found[i] = 0;
-		map_used[i] = 0;
 	}
+	st_map_used_count = 0;
 	for (i = 0; i < 256; ++i) {
 		int j;
 		int best, second;
 		int best_dist, second_dist;
 		int spread;
+		Uint8 best_u8, second_u8;
+		int phase;
 
 		best = 0;
 		second = 0;
-		best_dist = colorDist(st_colors[i], st_palette[0]);
+		best_dist = colorDist(st_colors[i], palette[0]);
 		second_dist = best_dist;
 		for (j = 1; j < 16; ++j) {
 			int dist;
 
-			dist = colorDist(st_colors[i], st_palette[j]);
+			dist = colorDist(st_colors[i], palette[j]);
 			if (dist < best_dist) {
 				second = best;
 				second_dist = best_dist;
@@ -372,12 +374,17 @@ static void updatePalette(_THIS, int refine_palette)
 			}
 		}
 
-		SDL_Atari_C2pPalette4[i] = best;
-		map_used[best] = 1;
+		best_u8 = (Uint8)best;
+		second_u8 = (Uint8)second;
+
+		SDL_Atari_C2pPalette4[i] = best_u8;
 		if (best_dist < inverse_dist[best]) {
+			if (!inverse_found[best]) {
+				inverse_found[best] = 1;
+				st_map_used_count++;
+			}
 			inverse_dist[best] = best_dist;
 			inverse_map[best] = i;
-			inverse_found[best] = 1;
 		}
 
 		if (second == best || (best_dist + second_dist) == 0) {
@@ -385,14 +392,8 @@ static void updatePalette(_THIS, int refine_palette)
 		} else {
 			spread = (best_dist << 4) / (best_dist + second_dist);
 		}
-		second_choice[i] = second;
-		spread_choice[i] = spread;
-	}
-
-	st_map_used_count = 0;
-	for (i = 0; i < 16; ++i) {
-		if (map_used[i]) {
-			st_map_used_count++;
+		for (phase = 0; phase < 16; ++phase) {
+			st_dither_map[phase][i] = (bayer4x4[phase] < spread) ? second_u8 : best_u8;
 		}
 	}
 
@@ -407,17 +408,6 @@ static void updatePalette(_THIS, int refine_palette)
 		st_palette_used[st_palette_source[i]] = 1;
 	}
 
-	for (i = 0; i < 256; ++i) {
-		int phase;
-		int best, second;
-
-		best = SDL_Atari_C2pPalette4[i];
-		second = second_choice[i];
-		for (phase = 0; phase < 16; ++phase) {
-			st_dither_map[phase][i] = (bayer4x4[phase] < spread_choice[i]) ? second : best;
-		}
-	}
-
 	setHardwarePalette(this);
 	st_palette_init = 1;
 }
@@ -426,15 +416,13 @@ static void updateGrayPalette(_THIS)
 {
 	extern Uint8 SDL_Atari_C2pPalette4[256];
 	int i;
+	int phase;
 
 	for (i = 0; i < 16; ++i) {
 		int value;
 
 		value = i * 17;
 		st_palette_source[i] = value;
-		st_palette[i].r = value;
-		st_palette[i].g = value;
-		st_palette[i].b = value;
 		TT_palette[i] = (ataricomponent(value) << 8)
 			      | (ataricomponent(value) << 4)
 			      | (ataricomponent(value));
@@ -448,7 +436,7 @@ static void updateGrayPalette(_THIS)
 	st_map_used_count = 16;
 
 	for (i = 0; i < 256; ++i) {
-		int gray, base, phase;
+		int gray, base;
 
 		gray = colorGray(st_colors[i]);
 		base = gray >> 4;
@@ -456,21 +444,19 @@ static void updateGrayPalette(_THIS)
 			base = 15;
 		}
 		SDL_Atari_C2pPalette4[i] = base;
-
-		for (phase = 0; phase < 16; ++phase) {
-			st_dither_map[phase][i] = base;
-		}
+	}
+	SDL_memcpy(st_dither_map[0], SDL_Atari_C2pPalette4, sizeof(st_dither_map[0]));
+	for (phase = 1; phase < 16; ++phase) {
+		SDL_memcpy(st_dither_map[phase], st_dither_map[0], sizeof(st_dither_map[0]));
 	}
 
 	st_palette_init = 1;
 }
 
-static void ditherConvertRect(_THIS, const Uint8 *src, Uint8 *dst, int x, int y, int w, int h, int srcpitch, int dstpitch)
+static void ditherConvertRect(const Uint8 *src, Uint8 *dst, int x, int y, int w, int h, int srcpitch, int dstpitch)
 {
-	const Uint8 *maps[16];
 	Uint32 phase;
-	Uint8 col;
-	int i;
+	const Uint8 * const *maps;
 
 	if ((x < 0) || (y < 0) || (w <= 0) || (h <= 0)) {
 		return;
@@ -483,15 +469,7 @@ static void ditherConvertRect(_THIS, const Uint8 *src, Uint8 *dst, int x, int y,
 		return;
 	}
 
-	col = (Uint8)(x & 3);
-	for (i = 0; i < 4; ++i) {
-		const int p = i << 2;
-
-		maps[(i << 2) + 0] = st_dither_map[p | col];
-		maps[(i << 2) + 1] = st_dither_map[p | ((col + 1) & 3)];
-		maps[(i << 2) + 2] = st_dither_map[p | ((col + 2) & 3)];
-		maps[(i << 2) + 3] = st_dither_map[p | ((col + 3) & 3)];
-	}
+	maps = st_dither_phase_maps[x & 3];
 
 	phase = (Uint32)(y & 3);
 	SDL_Atari_C2pConvert4_dither_rect(
@@ -503,7 +481,7 @@ static void ditherConvertRect(_THIS, const Uint8 *src, Uint8 *dst, int x, int y,
 	);
 }
 
-static int consumeFullRefresh(_THIS)
+static int consumeFullRefresh(void)
 {
 	int refresh;
 
@@ -546,6 +524,23 @@ static void loadPerfHints(void)
 	);
 }
 
+static void initDitherPhaseMaps(void)
+{
+	int col;
+	int row;
+
+	for (col = 0; col < 4; ++col) {
+		for (row = 0; row < 4; ++row) {
+			const int phase = row << 2;
+
+			st_dither_phase_maps[col][phase + 0] = st_dither_map[phase | ((col + 0) & 3)];
+			st_dither_phase_maps[col][phase + 1] = st_dither_map[phase | ((col + 1) & 3)];
+			st_dither_phase_maps[col][phase + 2] = st_dither_map[phase | ((col + 2) & 3)];
+			st_dither_phase_maps[col][phase + 3] = st_dither_map[phase | ((col + 3) & 3)];
+		}
+	}
+}
+
 static void initColorTable(void)
 {
 	int i;
@@ -557,6 +552,7 @@ static void initColorTable(void)
 		st_colors[i].unused = 0;
 	}
 	st_colors_init = 1;
+	initDitherPhaseMaps();
 }
 
 static void maybeWarnShadowBuffer(_THIS)
@@ -588,10 +584,7 @@ static void getUpdateRect(const SDL_Rect *rects, const xbiosstrect_t *merged_rec
 	}
 
 	*x1 = rects[idx].x & ~15;
-	*x2 = rects[idx].x + rects[idx].w;
-	if (*x2 & 15) {
-		*x2 = (*x2 | 15) +1;
-	}
+	*x2 = (rects[idx].x + rects[idx].w + 15) & ~15;
 	*y = rects[idx].y;
 	*h = rects[idx].h;
 }
@@ -939,6 +932,7 @@ static void updateRects_ST(_THIS, int numrects, SDL_Rect *rects)
 {
 	SDL_Surface *surface = this->screen;
 	Uint8 *c2p_source;
+	int dstpitch;
 	int src_offset;
 	int i;
 	int x1, x2, y, h;
@@ -957,6 +951,7 @@ static void updateRects_ST(_THIS, int numrects, SDL_Rect *rects)
 	src_offset = (surface->locked ? -surface->offset : 0);
 	did_full_refresh = 0;
 	doubleline = 0;
+	dstpitch = 0;
 	is_lowres = 0;
 	use_dither = 0;
 	merged_count = 0;
@@ -966,51 +961,58 @@ static void updateRects_ST(_THIS, int numrects, SDL_Rect *rects)
 
 	if (XBIOS_current->flags & XBIOSMODE_C2P) {
 		doubleline = (XBIOS_current->flags & XBIOSMODE_DOUBLELINE ? 1 : 0);
+		dstpitch = XBIOS_pitch << doubleline;
 		is_lowres = isStLow4Mode(this);
 		use_dither = is_lowres && isColorRenderMode();
 		c2p_source = surface->pixels + src_offset;
 
-		if (is_lowres && (numrects > 0)) {
-			if (numrects == 1) {
-				if (alignRect(&rects[0], surface->w, surface->h, &merged_rects[0])) {
-					merged_count = 1;
-					numrects = 1;
-					dirty_area = (merged_rects[0].x2 - merged_rects[0].x1) * merged_rects[0].h;
-				} else {
-					merged_count = 0;
-					numrects = 0;
-					dirty_area = 0;
-				}
-			} else {
-				merged_count = coalesceRects(
-					rects, numrects,
-					merged_rects, XBIOS_ST_MAX_BATCHED_RECTS,
-					surface->w, surface->h,
-					&dirty_area
-				);
-				if (merged_count >= 0) {
-					numrects = merged_count;
-				} else {
-					merged_count = 0;
-					dirty_area = sumRectArea(rects, numrects, total_area);
-					if (use_dither) {
+		if (use_dither) {
+			force_full_refresh = consumeFullRefresh();
+		}
+
+		if (!force_full_refresh) {
+			if (is_lowres && (numrects > 0)) {
+				if (numrects == 1) {
+					if (alignRect(&rects[0], surface->w, surface->h, &merged_rects[0])) {
+						merged_count = 1;
+						numrects = 1;
+						dirty_area = (merged_rects[0].x2 - merged_rects[0].x1) * merged_rects[0].h;
+					} else {
+						merged_count = 0;
 						numrects = 0;
-						dirty_area = total_area;
-						force_full_refresh = 1;
+						dirty_area = 0;
+					}
+				} else {
+					merged_count = coalesceRects(
+						rects, numrects,
+						merged_rects, XBIOS_ST_MAX_BATCHED_RECTS,
+						surface->w, surface->h,
+						&dirty_area
+					);
+					if (merged_count >= 0) {
+						numrects = merged_count;
+					} else {
+						merged_count = 0;
+						dirty_area = sumRectArea(rects, numrects, total_area);
+						if (use_dither) {
+							numrects = 0;
+							dirty_area = total_area;
+							force_full_refresh = 1;
+						}
 					}
 				}
 			}
-		}
 
-		if (!is_lowres && (numrects > 0)) {
-			dirty_area = sumRectArea(rects, numrects, total_area);
-		}
+			if (!is_lowres && (numrects > 0)) {
+				dirty_area = sumRectArea(rects, numrects, total_area);
+			}
 
-		if (use_dither) {
-			force_full_refresh |= consumeFullRefresh(this);
-			if (!force_full_refresh && (dirty_area > 0) && shouldFullRefresh(dirty_area, total_area)) {
+			if (use_dither && (dirty_area > 0) && shouldFullRefresh(dirty_area, total_area)) {
 				force_full_refresh = 1;
 			}
+		} else if (use_dither) {
+			dirty_area = total_area;
+			numrects = 0;
 		}
 
 #ifndef DEBUG_VIDEO_XBIOS
@@ -1023,13 +1025,12 @@ static void updateRects_ST(_THIS, int numrects, SDL_Rect *rects)
 
 		if (use_dither && force_full_refresh) {
 			ditherConvertRect(
-				this,
-				surface->pixels + src_offset,
+				c2p_source,
 				XBIOS_screens[XBIOS_fbnum],
 				0, 0,
 				surface->w, surface->h,
 				surface->pitch,
-				XBIOS_pitch << doubleline
+				dstpitch
 			);
 			did_full_refresh = 1;
 			dirty_area = total_area;
@@ -1041,13 +1042,12 @@ static void updateRects_ST(_THIS, int numrects, SDL_Rect *rects)
 
 			if (use_dither) {
 				ditherConvertRect(
-					this,
-					surface->pixels + src_offset,
+					c2p_source,
 					XBIOS_screens[XBIOS_fbnum],
 					x1, y,
 					x2-x1, h,
 					surface->pitch,
-					XBIOS_pitch << doubleline
+					dstpitch
 				);
 			} else {
 				SDL_Atari_C2pConvert(
@@ -1078,8 +1078,7 @@ static void updateRects_ST(_THIS, int numrects, SDL_Rect *rects)
 				copyRect(
 					XBIOS_screens[XBIOS_fbnum ^ 1],
 					XBIOS_screens[XBIOS_fbnum],
-					XBIOS_pitch << doubleline,
-					XBIOS_pitch << doubleline,
+					dstpitch, dstpitch,
 					x1, y,
 					x2 - x1, h
 				);
@@ -1095,6 +1094,7 @@ static int flipHWSurface_ST(_THIS, SDL_Surface *surface)
 	int dst_offset;
 	Uint8 *c2p_source;
 	int doubleline;
+	int dstpitch;
 	int is_lowres;
 	int use_dither;
 	int copy_x, copy_y, copy_w, copy_h;
@@ -1102,6 +1102,7 @@ static int flipHWSurface_ST(_THIS, SDL_Surface *surface)
 
 	src_offset = (surface->locked ? 0 : surface->offset);
 	doubleline = 0;
+	dstpitch = 0;
 	is_lowres = 0;
 	use_dither = 0;
 	copy_x = 0;
@@ -1114,10 +1115,11 @@ static int flipHWSurface_ST(_THIS, SDL_Surface *surface)
 
 	if (XBIOS_current->flags & XBIOSMODE_C2P) {
 		doubleline = (XBIOS_current->flags & XBIOSMODE_DOUBLELINE ? 1 : 0);
+		dstpitch = XBIOS_pitch << doubleline;
 		is_lowres = isStLow4Mode(this);
 		use_dither = is_lowres && isColorRenderMode();
 
-		dst_offset = this->offset_y * (XBIOS_pitch << doubleline) +
+		dst_offset = this->offset_y * dstpitch +
 				(this->offset_x & ~15) * XBIOS_current->depth / 8;
 		c2p_source = surface->pixels + src_offset;
 		copy_x = this->offset_x & ~15;
@@ -1131,12 +1133,12 @@ static int flipHWSurface_ST(_THIS, SDL_Surface *surface)
 				 (copy_w >= surface->w) && (copy_h >= surface->h);
 		if (use_dither) {
 			ditherConvertRect(
-				this, surface->pixels + src_offset,
+				c2p_source,
 				((Uint8 *)XBIOS_screens[XBIOS_fbnum]) + dst_offset,
 				0, 0,
 				surface->w, surface->h,
 				surface->pitch,
-				XBIOS_pitch << doubleline
+				dstpitch
 			);
 		} else {
 			SDL_Atari_C2pConvert(
@@ -1155,8 +1157,7 @@ static int flipHWSurface_ST(_THIS, SDL_Surface *surface)
 			copyRect(
 				XBIOS_screens[XBIOS_fbnum ^ 1],
 				XBIOS_screens[XBIOS_fbnum],
-				XBIOS_pitch << doubleline,
-				XBIOS_pitch << doubleline,
+				dstpitch, dstpitch,
 				copy_x, copy_y, copy_w, copy_h
 			);
 		}
@@ -1346,6 +1347,33 @@ static int setColors(_THIS, int firstcolor, int ncolors, SDL_Color *colors)
 		return(1);
 	}
 
+	if (!isColorRenderMode()) {
+		extern Uint8 SDL_Atari_C2pPalette4[256];
+		const int remap_all = !st_palette_init;
+
+		for (i = 0; i < ncolors; i++) {
+			SDL_Color *src, *dst;
+			int gray, base;
+
+			src = &colors[i];
+			dst = &st_colors[firstcolor+i];
+			if (!remap_all) {
+				if ((dst->r == src->r) && (dst->g == src->g) && (dst->b == src->b)) {
+					continue;
+				}
+			}
+			*dst = *src;
+
+			gray = colorGray(*dst);
+			base = gray >> 4;
+			if (base > 15) {
+				base = 15;
+			}
+			SDL_Atari_C2pPalette4[firstcolor+i] = base;
+		}
+		return(1);
+	}
+
 	changed = !st_palette_init;
 	palette_changed = !st_palette_init;
 	for (i = 0; i < ncolors; i++) {
@@ -1363,22 +1391,6 @@ static int setColors(_THIS, int firstcolor, int ncolors, SDL_Color *colors)
 		}
 	}
 	if (!changed) {
-		return(1);
-	}
-
-	if (!isColorRenderMode()) {
-		extern Uint8 SDL_Atari_C2pPalette4[256];
-
-		for (i = 0; i < ncolors; ++i) {
-			int gray, base;
-
-			gray = colorGray(st_colors[firstcolor+i]);
-			base = gray >> 4;
-			if (base > 15) {
-				base = 15;
-			}
-			SDL_Atari_C2pPalette4[firstcolor+i] = base;
-		}
 		return(1);
 	}
 
