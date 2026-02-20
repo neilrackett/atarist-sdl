@@ -93,7 +93,7 @@ static SDL_bool st_shadow_warning_shown;
 static int st_force_full_refresh = 1;
 static int st_map_used_count = 0;
 static const char *st_render_mode = ST_RENDER_COLOR;
-static int ste_blitter_available = -1;
+static int has_blitter = -1;
 static int xbios_st_full_refresh_threshold_pct = XBIOS_ST_DEFAULT_FULL_REFRESH_PCT;
 static int xbios_st_singlebuf_vsync_mode = XBIOS_ST_DEFAULT_SINGLEBUF_VSYNC;
 
@@ -124,6 +124,7 @@ static void maybeWarnShadowBuffer(_THIS);
 static int isColorRenderMode(void);
 static int isStLow4Mode(_THIS);
 static void getUpdateRect(const SDL_Rect *rects, const xbiosstrect_t *merged_rects, int merged_count, int idx, int *x1, int *x2, int *y, int *h);
+static int sumRectArea(const SDL_Rect *rects, int numrects, int max_area);
 static void swapBuffers(_THIS);
 static void syncSurfacePixels(_THIS, SDL_Surface *surface);
 
@@ -595,6 +596,28 @@ static void getUpdateRect(const SDL_Rect *rects, const xbiosstrect_t *merged_rec
 	*h = rects[idx].h;
 }
 
+static int sumRectArea(const SDL_Rect *rects, int numrects, int max_area)
+{
+	int area;
+	int i;
+
+	area = 0;
+	for (i = 0; i < numrects; ++i) {
+		int w, h;
+
+		w = rects[i].w;
+		h = rects[i].h;
+		if ((w > 0) && (h > 0)) {
+			area += w * h;
+			if (area >= max_area) {
+				return max_area;
+			}
+		}
+	}
+
+	return area;
+}
+
 static void swapBuffers(_THIS)
 {
 #ifndef DEBUG_VIDEO_XBIOS
@@ -619,9 +642,9 @@ static int shouldFullRefresh(int dirty_area, int total_area)
 	return (dirty_area * 100) >= (total_area * xbios_st_full_refresh_threshold_pct);
 }
 
-static int shouldSingleBufVsync(int is_st_low4, int dirty_area, int total_area)
+static int shouldSingleBufVsync(int is_lowres, int dirty_area, int total_area)
 {
-	if (!is_st_low4) {
+	if (!is_lowres) {
 		return 1;
 	}
 
@@ -637,11 +660,11 @@ static int shouldSingleBufVsync(int is_st_low4, int dirty_area, int total_area)
 
 static int hasBlitter(void)
 {
-	if (ste_blitter_available < 0) {
-		ste_blitter_available = (Blitmode(-1) & 1) ? 1 : 0;
+	if (has_blitter < 0) {
+		has_blitter = (Blitmode(-1) & 1) ? 1 : 0;
 	}
 
-	return ste_blitter_available;
+	return has_blitter;
 }
 
 static void copyRect(Uint8 *src_base, Uint8 *dst_base, int srcpitch, int dstpitch, int x, int y, int w, int h)
@@ -805,10 +828,7 @@ static int coalesceRects(const SDL_Rect *rects, int numrects, xbiosstrect_t *mer
 
 		xbin1 = rect.x1 >> XBIOS_ST_TILE_SHIFT;
 		xbin2 = (rect.x2 - 1) >> XBIOS_ST_TILE_SHIFT;
-		row_mask = 0;
-		for (yy = xbin1; yy <= xbin2; ++yy) {
-			row_mask |= ((Uint32)1 << yy);
-		}
+		row_mask = ((((Uint32)1 << (xbin2 - xbin1 + 1)) - 1) << xbin1);
 
 		for (yy = rect.y; yy < rect.y + rect.h; ++yy) {
 			dirty_rows[yy] |= row_mask;
@@ -827,8 +847,8 @@ static int coalesceRects(const SDL_Rect *rects, int numrects, xbiosstrect_t *mer
 		span_count = 0;
 		while (mask) {
 			int xbin1, xbin2;
-			int xx;
 			int x1, x2;
+			Uint32 span_mask;
 
 			for (xbin1 = 0; xbin1 < cols; ++xbin1) {
 				if (mask & ((Uint32)1 << xbin1)) {
@@ -857,9 +877,8 @@ static int coalesceRects(const SDL_Rect *rects, int numrects, xbiosstrect_t *mer
 			span_x2[span_count] = x2;
 			++span_count;
 
-			for (xx = xbin1; xx <= xbin2; ++xx) {
-				mask &= ~((Uint32)1 << xx);
-			}
+			span_mask = ((((Uint32)1 << (xbin2 - xbin1 + 1)) - 1) << xbin1);
+			mask &= ~span_mask;
 		}
 
 		next_active_count = 0;
@@ -925,9 +944,8 @@ static void updateRects_ST(_THIS, int numrects, SDL_Rect *rects)
 	int x1, x2, y, h;
 	int did_full_refresh;
 	int doubleline;
-	int is_st_low4;
-	int use_st_dither;
-	int use_st_blitter_copyback;
+	int is_lowres;
+	int use_dither;
 	int merged_count;
 	int force_full_refresh;
 	int dirty_area;
@@ -939,9 +957,8 @@ static void updateRects_ST(_THIS, int numrects, SDL_Rect *rects)
 	src_offset = (surface->locked ? -surface->offset : 0);
 	did_full_refresh = 0;
 	doubleline = 0;
-	is_st_low4 = 0;
-	use_st_dither = 0;
-	use_st_blitter_copyback = 0;
+	is_lowres = 0;
+	use_dither = 0;
 	merged_count = 0;
 	force_full_refresh = 0;
 	dirty_area = 0;
@@ -949,47 +966,47 @@ static void updateRects_ST(_THIS, int numrects, SDL_Rect *rects)
 
 	if (XBIOS_current->flags & XBIOSMODE_C2P) {
 		doubleline = (XBIOS_current->flags & XBIOSMODE_DOUBLELINE ? 1 : 0);
-		is_st_low4 = isStLow4Mode(this);
-		use_st_dither = is_st_low4 && isColorRenderMode();
-		use_st_blitter_copyback = is_st_low4;
+		is_lowres = isStLow4Mode(this);
+		use_dither = is_lowres && isColorRenderMode();
 		c2p_source = surface->pixels + src_offset;
 
-		if (is_st_low4 && (numrects > 0)) {
-			merged_count = coalesceRects(
-				rects, numrects,
-				merged_rects, XBIOS_ST_MAX_BATCHED_RECTS,
-				surface->w, surface->h,
-				&dirty_area
-			);
-			if (merged_count >= 0) {
-				numrects = merged_count;
-			} else {
-				merged_count = 0;
-				if (use_st_dither) {
+		if (is_lowres && (numrects > 0)) {
+			if (numrects == 1) {
+				if (alignRect(&rects[0], surface->w, surface->h, &merged_rects[0])) {
+					merged_count = 1;
+					numrects = 1;
+					dirty_area = (merged_rects[0].x2 - merged_rects[0].x1) * merged_rects[0].h;
+				} else {
+					merged_count = 0;
 					numrects = 0;
-					dirty_area = total_area;
-					force_full_refresh = 1;
+					dirty_area = 0;
+				}
+			} else {
+				merged_count = coalesceRects(
+					rects, numrects,
+					merged_rects, XBIOS_ST_MAX_BATCHED_RECTS,
+					surface->w, surface->h,
+					&dirty_area
+				);
+				if (merged_count >= 0) {
+					numrects = merged_count;
+				} else {
+					merged_count = 0;
+					dirty_area = sumRectArea(rects, numrects, total_area);
+					if (use_dither) {
+						numrects = 0;
+						dirty_area = total_area;
+						force_full_refresh = 1;
+					}
 				}
 			}
 		}
 
-		if (!is_st_low4 && (numrects > 0)) {
-			for (i = 0; i < numrects; ++i) {
-				int rw;
-				int rh;
-
-				rw = rects[i].w;
-				rh = rects[i].h;
-				if ((rw > 0) && (rh > 0)) {
-					dirty_area += rw * rh;
-				}
-			}
-			if (dirty_area > total_area) {
-				dirty_area = total_area;
-			}
+		if (!is_lowres && (numrects > 0)) {
+			dirty_area = sumRectArea(rects, numrects, total_area);
 		}
 
-		if (use_st_dither) {
+		if (use_dither) {
 			force_full_refresh |= consumeFullRefresh(this);
 			if (!force_full_refresh && (dirty_area > 0) && shouldFullRefresh(dirty_area, total_area)) {
 				force_full_refresh = 1;
@@ -998,13 +1015,13 @@ static void updateRects_ST(_THIS, int numrects, SDL_Rect *rects)
 
 #ifndef DEBUG_VIDEO_XBIOS
 		if ((surface->flags & SDL_DOUBLEBUF) != SDL_DOUBLEBUF) {
-			if (shouldSingleBufVsync(is_st_low4, dirty_area, total_area)) {
+			if (shouldSingleBufVsync(is_lowres, dirty_area, total_area)) {
 				(*XBIOS_vsync)(this);
 			}
 		}
 #endif
 
-		if (use_st_dither && force_full_refresh) {
+		if (use_dither && force_full_refresh) {
 			ditherConvertRect(
 				this,
 				surface->pixels + src_offset,
@@ -1022,7 +1039,7 @@ static void updateRects_ST(_THIS, int numrects, SDL_Rect *rects)
 		for (i=0;i<numrects;i++) {
 			getUpdateRect(rects, merged_rects, merged_count, i, &x1, &x2, &y, &h);
 
-			if (use_st_dither) {
+			if (use_dither) {
 				ditherConvertRect(
 					this,
 					surface->pixels + src_offset,
@@ -1054,7 +1071,7 @@ static void updateRects_ST(_THIS, int numrects, SDL_Rect *rects)
 			copy_back = 0;
 		}
 
-		if (copy_back && use_st_blitter_copyback && hasBlitter()) {
+		if (copy_back && is_lowres && hasBlitter()) {
 			for (i = 0; i < numrects; ++i) {
 				getUpdateRect(rects, merged_rects, merged_count, i, &x1, &x2, &y, &h);
 
@@ -1078,15 +1095,15 @@ static int flipHWSurface_ST(_THIS, SDL_Surface *surface)
 	int dst_offset;
 	Uint8 *c2p_source;
 	int doubleline;
-	int is_st_low4;
-	int use_st_dither;
+	int is_lowres;
+	int use_dither;
 	int copy_x, copy_y, copy_w, copy_h;
 	int is_full_redraw;
 
 	src_offset = (surface->locked ? 0 : surface->offset);
 	doubleline = 0;
-	is_st_low4 = 0;
-	use_st_dither = 0;
+	is_lowres = 0;
+	use_dither = 0;
 	copy_x = 0;
 	copy_y = 0;
 	copy_w = surface->w;
@@ -1097,8 +1114,8 @@ static int flipHWSurface_ST(_THIS, SDL_Surface *surface)
 
 	if (XBIOS_current->flags & XBIOSMODE_C2P) {
 		doubleline = (XBIOS_current->flags & XBIOSMODE_DOUBLELINE ? 1 : 0);
-		is_st_low4 = isStLow4Mode(this);
-		use_st_dither = is_st_low4 && isColorRenderMode();
+		is_lowres = isStLow4Mode(this);
+		use_dither = is_lowres && isColorRenderMode();
 
 		dst_offset = this->offset_y * (XBIOS_pitch << doubleline) +
 				(this->offset_x & ~15) * XBIOS_current->depth / 8;
@@ -1112,7 +1129,7 @@ static int flipHWSurface_ST(_THIS, SDL_Surface *surface)
 		copy_h = surface->h;
 		is_full_redraw = (copy_x <= 0) && (copy_y <= 0) &&
 				 (copy_w >= surface->w) && (copy_h >= surface->h);
-		if (use_st_dither) {
+		if (use_dither) {
 			ditherConvertRect(
 				this, surface->pixels + src_offset,
 				((Uint8 *)XBIOS_screens[XBIOS_fbnum]) + dst_offset,
@@ -1134,7 +1151,7 @@ static int flipHWSurface_ST(_THIS, SDL_Surface *surface)
 
 	if ((surface->flags & SDL_DOUBLEBUF) == SDL_DOUBLEBUF) {
 		swapBuffers(this);
-		if (is_st_low4 && !is_full_redraw && hasBlitter()) {
+		if (is_lowres && !is_full_redraw && hasBlitter()) {
 			copyRect(
 				XBIOS_screens[XBIOS_fbnum ^ 1],
 				XBIOS_screens[XBIOS_fbnum],
@@ -1171,7 +1188,7 @@ void SDL_XBIOS_VideoInit_ST(_THIS, unsigned long cookie_cvdo)
 	}
 	st_force_full_refresh = 1;
 	st_shadow_warning_shown = SDL_FALSE;
-	ste_blitter_available = -1;
+	has_blitter = -1;
 
 	XBIOS_listModes = listModes;
 	XBIOS_saveMode = saveMode;
