@@ -118,6 +118,10 @@ static __inline__ Uint32 colorKey(SDL_Color color)
 	return ((Uint32)color.r << 16) | ((Uint32)color.g << 8) | (Uint32)color.b;
 }
 
+/**
+ * Enables render mode to be changed mid-flight
+ * Useful mainly for benchmarking
+ */
 static void updateRenderMode(void)
 {
 	const char *envr;
@@ -454,7 +458,10 @@ static void updateGrayPalette(_THIS, int dither)
 
 void SDL_XBIOS_ST_DitherConvertRect(_THIS, const Uint8 *src, Uint8 *dst, int x, int y, int w, int h, int srcpitch, int dstpitch)
 {
-	int row;
+	const Uint8 *maps[16];
+	Uint32 phase;
+	Uint8 col;
+	int i;
 
 	if ((x < 0) || (y < 0) || (w <= 0) || (h <= 0)) {
 		return;
@@ -467,23 +474,24 @@ void SDL_XBIOS_ST_DitherConvertRect(_THIS, const Uint8 *src, Uint8 *dst, int x, 
 		return;
 	}
 
-	for (row = 0; row < h; ++row) {
-		const Uint8 *s;
-		Uint8 *d;
-		const Uint8 *m0, *m1, *m2, *m3;
-		int phase, col;
+	col = (Uint8)(x & 3);
+	for (i = 0; i < 4; ++i) {
+		const int p = i << 2;
 
-		s = src + (y + row) * srcpitch + x;
-		d = dst + (y + row) * dstpitch + (x >> 1);
-		phase = ((y + row) & 3) << 2;
-		col = x & 3;
-		m0 = st_dither_map[phase | col];
-		m1 = st_dither_map[phase | ((col + 1) & 3)];
-		m2 = st_dither_map[phase | ((col + 2) & 3)];
-		m3 = st_dither_map[phase | ((col + 3) & 3)];
-
-		SDL_Atari_C2pConvert4_dither_line(s, d, w, m0, m1, m2, m3);
+		maps[(i << 2) + 0] = st_dither_map[p | col];
+		maps[(i << 2) + 1] = st_dither_map[p | ((col + 1) & 3)];
+		maps[(i << 2) + 2] = st_dither_map[p | ((col + 2) & 3)];
+		maps[(i << 2) + 3] = st_dither_map[p | ((col + 3) & 3)];
 	}
+
+	phase = (Uint32)(y & 3);
+	SDL_Atari_C2pConvert4_dither_rect(
+		src + y * srcpitch + x,
+		dst + y * dstpitch + (x >> 1),
+		(Uint32)w, (Uint32)h,
+		(Uint32)srcpitch, (Uint32)dstpitch,
+		phase, maps
+	);
 }
 
 int SDL_XBIOS_ST_ConsumeFullRefresh(_THIS)
@@ -498,6 +506,24 @@ int SDL_XBIOS_ST_ConsumeFullRefresh(_THIS)
 int SDL_XBIOS_ST_GetRenderMode(void)
 {
 	return st_render_mode;
+}
+
+void SDL_XBIOS_ST_SyncRenderMode(_THIS)
+{
+	int old_mode;
+
+	old_mode = st_render_mode;
+	updateRenderMode();
+	if (st_render_mode == old_mode) {
+		return;
+	}
+
+	if (st_render_mode != ST_RENDER_COLOR_DITHER) {
+		updateGrayPalette(this, st_render_mode == ST_RENDER_GRAYSCALE_DITHER);
+	} else {
+		updatePalette(this, 1);
+	}
+	st_force_full_refresh = 1;
 }
 
 void SDL_XBIOS_VideoInit_ST(_THIS, unsigned long cookie_cvdo)

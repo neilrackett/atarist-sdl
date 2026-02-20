@@ -60,6 +60,7 @@ Release
 
 test/stdout.txt
 test/stderr.txt
+test/testsprite_bench.md
 test/checkkeys
 test/graywin
 test/loopwave

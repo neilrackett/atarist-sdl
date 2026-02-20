@@ -87,6 +87,18 @@ void SDL_Atari_C2pConvert4_dither_line(
 	const Uint8 *map3	/* Map for x mod 4 = 3 */
 );
 
+/* Convert a chunky rectangle to 4bpp bitplanes using precomputed dither maps. */
+void SDL_Atari_C2pConvert4_dither_rect(
+	const Uint8 *src,	/* Source rectangle start (one byte=one pixel) */
+	Uint8 *dest,		/* Destination rectangle start (4 bit planes) */
+	Uint32 srcwidth,	/* Rectangle width in pixels, multiple of 16 */
+	Uint32 height,		/* Rectangle height in lines */
+	Uint32 srcpitch,	/* Source pitch in bytes */
+	Uint32 dstpitch,	/* Destination pitch in bytes */
+	Uint32 startphase,	/* Start row phase, range [0..3] */
+	const Uint8 * const *maps	/* 16 map pointers, 4 phases x 4 columns */
+);
+
 /*--- Functions ---*/
 
 /* Wrapper for the functions above */

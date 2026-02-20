@@ -36,6 +36,7 @@
 	.globl	SYM(SDL_Atari_C2pConvert4)
 	.globl	SYM(SDL_Atari_C2pConvert4_rect)
 	.globl	SYM(SDL_Atari_C2pConvert4_dither_line)
+	.globl	SYM(SDL_Atari_C2pConvert4_dither_rect)
 
 	.globl	SYM(SDL_Atari_C2pPalette4)
 
@@ -1071,6 +1072,79 @@ c2p1x1_4_dither_pix16:
 	bne	c2p1x1_4_dither_pix16
 
 c2p1x1_4_dither_done:
+	movem.l	(sp)+,d2-d7/a2-a6
+#endif
+	rts
+
+	| void SDL_Atari_C2pConvert4_dither_rect(const byte *pChunky, byte *pScreen, uint32 chunkyWidth, uint32 chunkyHeight, uint32 chunkyPitch, uint32 screenPitch, uint32 startPhase, const byte * const *maps);
+SYM(SDL_Atari_C2pConvert4_dither_rect):
+#if !defined(__mcoldfire__)
+	movem.l	d2-d7/a2-a6,-(sp)
+
+#ifdef __FASTCALL__
+									| a0: chunky
+									| a1: screen
+									| d0.l: chunky width
+									| d1.l: chunky height
+									| d2.l: chunky pitch
+									| d3.l: screen pitch
+	move.l	(11*4+4,sp),d4			| start phase
+	move.l	(11*4+8,sp),a2			| maps
+#else
+	move.l	(11*4+4,sp),a0			| chunky
+	move.l	(11*4+8,sp),a1			| screen
+	move.l	(11*4+12,sp),d0			| chunky width
+	move.l	(11*4+16,sp),d1			| chunky height
+	move.l	(11*4+20,sp),d2			| chunky pitch
+	move.l	(11*4+24,sp),d3			| screen pitch
+	move.l	(11*4+28,sp),d4			| start phase
+	move.l	(11*4+32,sp),a2			| maps
+#endif
+
+	move.l	d0,d6					| keep width across calls
+	move.l	d1,d7					| line count
+	move.l	a0,a4					| current chunky line
+	move.l	a1,a5					| current screen line
+	and.l	#3,d4
+
+	tst.l	d7
+	beq.s	c2p1x1_4_dither_rect_done
+
+c2p1x1_4_dither_rect_line:
+	move.l	d4,d5
+	lsl.l	#4,d5
+	lea	(a2,d5.l),a3				| 4 map pointers for this line phase
+
+#ifdef __FASTCALL__
+	move.l	a4,a0
+	move.l	a5,a1
+	move.l	d6,d0
+	move.l	(12,a3),-(sp)
+	move.l	(8,a3),-(sp)
+	move.l	(4,a3),-(sp)
+	move.l	(a3),-(sp)
+	jsr	SYM(SDL_Atari_C2pConvert4_dither_line)
+	add.l	#16,sp
+#else
+	move.l	(12,a3),-(sp)
+	move.l	(8,a3),-(sp)
+	move.l	(4,a3),-(sp)
+	move.l	(a3),-(sp)
+	move.l	d6,-(sp)
+	move.l	a5,-(sp)
+	move.l	a4,-(sp)
+	jsr	SYM(SDL_Atari_C2pConvert4_dither_line)
+	lea	(28,sp),sp
+#endif
+
+	add.l	d2,a4
+	add.l	d3,a5
+	addq.l	#1,d4
+	and.l	#3,d4
+	subq.l	#1,d7
+	bne.s	c2p1x1_4_dither_rect_line
+
+c2p1x1_4_dither_rect_done:
 	movem.l	(sp)+,d2-d7/a2-a6
 #endif
 	rts

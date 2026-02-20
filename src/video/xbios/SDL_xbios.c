@@ -107,8 +107,72 @@ typedef struct {
 	int h;
 } xbiosstrect_t;
 
-#define XBIOS_ST_MERGE_GAP_X 16
-#define XBIOS_ST_MERGE_GAP_Y 2
+#define XBIOS_ST_LOW_WIDTH 320
+#define XBIOS_ST_LOW_HEIGHT 200
+#define XBIOS_ST_TILE_SHIFT 4
+#define XBIOS_ST_TILE_WIDTH (1 << XBIOS_ST_TILE_SHIFT)
+#define XBIOS_ST_MAX_SPANS_PER_ROW (XBIOS_ST_LOW_WIDTH / XBIOS_ST_TILE_WIDTH)
+
+/* These are balanced defaults; use 100/0/0/0 for best FPS at expense of likely tearing and artifacts */
+#define XBIOS_ST_DEFAULT_FULL_REFRESH_PCT 60
+#define XBIOS_ST_COPYBACK_SKIP_PCT 85
+#define XBIOS_ST_DEFAULT_SINGLEBUF_VSYNC 2
+#define XBIOS_ST_ADAPTIVE_VSYNC_PCT 25
+
+static int XBIOS_ST_ParseEnvInt(const char *name, int default_value, int min_value, int max_value)
+{
+	const char *envr;
+	int value;
+
+	envr = SDL_getenv(name);
+	if (!envr || !*envr) {
+		return default_value;
+	}
+
+	value = SDL_atoi(envr);
+	if (value < min_value) {
+		value = min_value;
+	} else if (value > max_value) {
+		value = max_value;
+	}
+
+	return value;
+}
+
+static void XBIOS_ST_LoadPerfHints(int *full_refresh_threshold_pct, int *singlebuf_vsync_mode)
+{
+	*full_refresh_threshold_pct = XBIOS_ST_ParseEnvInt(
+		"SDL_XBIOS_ST_FULL_REFRESH_PCT",
+		XBIOS_ST_DEFAULT_FULL_REFRESH_PCT,
+		0, 100
+	);
+	*singlebuf_vsync_mode = XBIOS_ST_ParseEnvInt(
+		"SDL_XBIOS_ST_SINGLEBUF_VSYNC",
+		XBIOS_ST_DEFAULT_SINGLEBUF_VSYNC,
+		0, 2
+	);
+}
+
+static int XBIOS_ST_ShouldFullRefresh(int dirty_area, int total_area, int full_refresh_threshold_pct)
+{
+	return (dirty_area * 100) >= (total_area * full_refresh_threshold_pct);
+}
+
+static int XBIOS_ST_ShouldSingleBufVsync(int is_st_low4, int dirty_area, int total_area, int singlebuf_vsync_mode)
+{
+	if (!is_st_low4) {
+		return 1;
+	}
+
+	if (singlebuf_vsync_mode <= 0) {
+		return 0;
+	}
+	if (singlebuf_vsync_mode >= 2) {
+		return (dirty_area * 100) <= (total_area * XBIOS_ST_ADAPTIVE_VSYNC_PCT);
+	}
+
+	return 1;
+}
 
 static int XBIOS_ST_HasBlitter(void)
 {
@@ -158,6 +222,11 @@ static void XBIOS_ST_CopyRect(Uint8 *src_base, Uint8 *dst_base, int srcpitch, in
 	/* Fallback when geometry is not blitter friendly. */
 	if ((((long) src | (long) dst | bytes | srcpitch | dstpitch) & 1) != 0 ||
 	    (srcpitch < bytes) || (dstpitch < bytes)) {
+		if ((srcpitch == bytes) && (dstpitch == bytes)) {
+			SDL_memcpy(dst, src, bytes * h);
+			return;
+		}
+
 		for (row = 0; row < h; ++row) {
 			SDL_memcpy(dst, src, bytes);
 			src += srcpitch;
@@ -189,126 +258,199 @@ static void XBIOS_ST_CopyRect(Uint8 *src_base, Uint8 *dst_base, int srcpitch, in
 	}
 }
 
-static int XBIOS_ST_RectArea(const xbiosstrect_t *r)
+static int XBIOS_ST_AlignRect(const SDL_Rect *rect, int max_w, int max_h, xbiosstrect_t *out)
 {
-	return (r->x2 - r->x1) * r->h;
+	int x1, x2, y1, y2;
+
+	if ((rect->w <= 0) || (rect->h <= 0)) {
+		return 0;
+	}
+
+	x1 = rect->x;
+	y1 = rect->y;
+	x2 = rect->x + rect->w;
+	y2 = rect->y + rect->h;
+
+	if (x1 < 0) {
+		x1 = 0;
+	}
+	if (y1 < 0) {
+		y1 = 0;
+	}
+	if (x2 > max_w) {
+		x2 = max_w;
+	}
+	if (y2 > max_h) {
+		y2 = max_h;
+	}
+	if ((x2 <= x1) || (y2 <= y1)) {
+		return 0;
+	}
+
+	x1 &= ~(XBIOS_ST_TILE_WIDTH - 1);
+	if (x2 & (XBIOS_ST_TILE_WIDTH - 1)) {
+		x2 = (x2 + XBIOS_ST_TILE_WIDTH - 1) & ~(XBIOS_ST_TILE_WIDTH - 1);
+		if (x2 > max_w) {
+			x2 = max_w;
+		}
+	}
+
+	out->x1 = x1;
+	out->x2 = x2;
+	out->y = y1;
+	out->h = y2 - y1;
+	return 1;
 }
 
-static int XBIOS_ST_CanMergeRects(const xbiosstrect_t *a, const xbiosstrect_t *b)
+static int XBIOS_ST_CoalesceRects(const SDL_Rect *rects, int numrects, xbiosstrect_t *merged, int max_merged, int max_w, int max_h, int *dirty_area)
 {
-	int ax2, ay2, bx2, by2;
-	int nx1, nx2, ny1, ny2;
-	int area_a, area_b, area_bbox, area_sum;
-	int overlap;
-	int same_row_near;
-	int same_col_near;
+	Uint32 dirty_rows[XBIOS_ST_LOW_HEIGHT];
+	int active_idx[XBIOS_ST_MAX_SPANS_PER_ROW];
+	int next_active_idx[XBIOS_ST_MAX_SPANS_PER_ROW];
+	int span_x1[XBIOS_ST_MAX_SPANS_PER_ROW];
+	int span_x2[XBIOS_ST_MAX_SPANS_PER_ROW];
+	int merged_count, active_count;
+	int cols, rows;
+	int i, y;
 
-	ax2 = a->x2;
-	ay2 = a->y + a->h;
-	bx2 = b->x2;
-	by2 = b->y + b->h;
-
-	overlap = !(ax2 < b->x1 || bx2 < a->x1 || ay2 < b->y || by2 < a->y);
-	if (overlap) {
-		return 1;
+	if (max_w > XBIOS_ST_LOW_WIDTH) {
+		max_w = XBIOS_ST_LOW_WIDTH;
+	}
+	if (max_h > XBIOS_ST_LOW_HEIGHT) {
+		max_h = XBIOS_ST_LOW_HEIGHT;
+	}
+	if ((max_w <= 0) || (max_h <= 0)) {
+		if (dirty_area) {
+			*dirty_area = 0;
+		}
+		return 0;
 	}
 
-	same_row_near = (a->y == b->y) && (a->h == b->h)
-		&& !(ax2 + XBIOS_ST_MERGE_GAP_X < b->x1 || bx2 + XBIOS_ST_MERGE_GAP_X < a->x1);
-	if (same_row_near) {
-		return 1;
+	rows = max_h;
+	cols = (max_w + XBIOS_ST_TILE_WIDTH - 1) >> XBIOS_ST_TILE_SHIFT;
+	if (cols > XBIOS_ST_MAX_SPANS_PER_ROW) {
+		cols = XBIOS_ST_MAX_SPANS_PER_ROW;
 	}
 
-	same_col_near = (a->x1 == b->x1) && (a->x2 == b->x2)
-		&& !(ay2 + XBIOS_ST_MERGE_GAP_Y < b->y || by2 + XBIOS_ST_MERGE_GAP_Y < a->y);
-	if (same_col_near) {
-		return 1;
-	}
-
-	nx1 = (a->x1 < b->x1) ? a->x1 : b->x1;
-	nx2 = (ax2 > bx2) ? ax2 : bx2;
-	ny1 = (a->y < b->y) ? a->y : b->y;
-	ny2 = (ay2 > by2) ? ay2 : by2;
-
-	area_a = XBIOS_ST_RectArea(a);
-	area_b = XBIOS_ST_RectArea(b);
-	area_sum = area_a + area_b;
-	area_bbox = (nx2 - nx1) * (ny2 - ny1);
-
-	/* Allow merge when overdraw increase is at most 50%. */
-	return (area_bbox <= area_sum + (area_sum >> 1));
-}
-
-static void XBIOS_ST_MergeRects(xbiosstrect_t *dst, const xbiosstrect_t *src)
-{
-	int y2, sy2;
-
-	if (src->x1 < dst->x1) {
-		dst->x1 = src->x1;
-	}
-	if (src->x2 > dst->x2) {
-		dst->x2 = src->x2;
-	}
-	y2 = dst->y + dst->h;
-	sy2 = src->y + src->h;
-	if (src->y < dst->y) {
-		dst->y = src->y;
-	}
-	if (sy2 > y2) {
-		y2 = sy2;
-	}
-	dst->h = y2 - dst->y;
-}
-
-static int XBIOS_ST_CoalesceRects(const SDL_Rect *rects, int numrects, xbiosstrect_t *merged, int max_merged)
-{
-	int i, j;
-	int merged_count;
-
-	merged_count = 0;
-
+	SDL_memset(dirty_rows, 0, sizeof(dirty_rows));
 	for (i = 0; i < numrects; ++i) {
 		xbiosstrect_t rect;
+		Uint32 row_mask;
+		int xbin1, xbin2;
+		int yy;
 
-		rect.x1 = rects[i].x & ~15;
-		rect.x2 = rects[i].x + rects[i].w;
-		if (rect.x2 & 15) {
-			rect.x2 = (rect.x2 | 15) + 1;
-		}
-		rect.y = rects[i].y;
-		rect.h = rects[i].h;
-
-		if ((rect.h <= 0) || (rect.x2 <= rect.x1)) {
+		if (!XBIOS_ST_AlignRect(&rects[i], max_w, max_h, &rect)) {
 			continue;
 		}
 
-		if (merged_count >= max_merged) {
-			return -1;
+		xbin1 = rect.x1 >> XBIOS_ST_TILE_SHIFT;
+		xbin2 = (rect.x2 - 1) >> XBIOS_ST_TILE_SHIFT;
+		row_mask = 0;
+		for (yy = xbin1; yy <= xbin2; ++yy) {
+			row_mask |= ((Uint32)1 << yy);
 		}
-		merged[merged_count++] = rect;
+
+		for (yy = rect.y; yy < rect.y + rect.h; ++yy) {
+			dirty_rows[yy] |= row_mask;
+		}
 	}
 
-	for (;;) {
-		int did_merge;
+	merged_count = 0;
+	active_count = 0;
+	for (y = 0; y < rows; ++y) {
+		Uint32 mask;
+		int span_count;
+		int next_active_count;
+		int span;
 
-		did_merge = 0;
-		for (i = 0; i < merged_count && !did_merge; ++i) {
-			for (j = i + 1; j < merged_count; ++j) {
-				if (!XBIOS_ST_CanMergeRects(&merged[i], &merged[j])) {
-					continue;
+		mask = dirty_rows[y];
+		span_count = 0;
+		while (mask) {
+			int xbin1, xbin2;
+			int xx;
+			int x1, x2;
+
+			for (xbin1 = 0; xbin1 < cols; ++xbin1) {
+				if (mask & ((Uint32)1 << xbin1)) {
+					break;
 				}
-
-				XBIOS_ST_MergeRects(&merged[i], &merged[j]);
-				merged[j] = merged[merged_count - 1];
-				merged_count--;
-				did_merge = 1;
+			}
+			if (xbin1 >= cols) {
 				break;
+			}
+
+			xbin2 = xbin1;
+			while ((xbin2 + 1 < cols) && (mask & ((Uint32)1 << (xbin2 + 1)))) {
+				++xbin2;
+			}
+
+			x1 = xbin1 << XBIOS_ST_TILE_SHIFT;
+			x2 = (xbin2 + 1) << XBIOS_ST_TILE_SHIFT;
+			if (x2 > max_w) {
+				x2 = max_w;
+			}
+
+			if (span_count >= XBIOS_ST_MAX_SPANS_PER_ROW) {
+				return -1;
+			}
+			span_x1[span_count] = x1;
+			span_x2[span_count] = x2;
+			++span_count;
+
+			for (xx = xbin1; xx <= xbin2; ++xx) {
+				mask &= ~((Uint32)1 << xx);
 			}
 		}
 
-		if (!did_merge) {
-			break;
+		next_active_count = 0;
+		for (span = 0; span < span_count; ++span) {
+			int found_idx;
+			int a;
+
+			found_idx = -1;
+			for (a = 0; a < active_count; ++a) {
+				int idx;
+
+				idx = active_idx[a];
+				if ((merged[idx].x1 == span_x1[span]) &&
+				    (merged[idx].x2 == span_x2[span]) &&
+				    (merged[idx].y + merged[idx].h == y)) {
+					found_idx = idx;
+					break;
+				}
+			}
+
+			if (found_idx >= 0) {
+				merged[found_idx].h++;
+				next_active_idx[next_active_count++] = found_idx;
+			} else {
+				if (merged_count >= max_merged) {
+					return -1;
+				}
+
+				merged[merged_count].x1 = span_x1[span];
+				merged[merged_count].x2 = span_x2[span];
+				merged[merged_count].y = y;
+				merged[merged_count].h = 1;
+				next_active_idx[next_active_count++] = merged_count;
+				merged_count++;
+			}
 		}
+
+		active_count = next_active_count;
+		for (i = 0; i < active_count; ++i) {
+			active_idx[i] = next_active_idx[i];
+		}
+	}
+
+	if (dirty_area) {
+		int area;
+
+		area = 0;
+		for (i = 0; i < merged_count; ++i) {
+			area += (merged[i].x2 - merged[i].x1) * merged[i].h;
+		}
+		*dirty_area = area;
 	}
 
 	return merged_count;
@@ -829,6 +971,11 @@ static void XBIOS_UpdateRects(_THIS, int numrects, SDL_Rect *rects)
 	int is_st_low4;
 	int use_st_dither;
 	int merged_count;
+	int force_full_refresh;
+	int dirty_area;
+	int total_area;
+	int full_refresh_threshold_pct;
+	int singlebuf_vsync_mode;
 	xbiosstrect_t merged_rects[XBIOS_ST_MAX_BATCHED_RECTS];
 
 	did_full_refresh = 0;
@@ -836,8 +983,15 @@ static void XBIOS_UpdateRects(_THIS, int numrects, SDL_Rect *rects)
 	is_st_low4 = 0;
 	use_st_dither = 0;
 	merged_count = 0;
+	force_full_refresh = 0;
+	dirty_area = 0;
+	total_area = surface->w * surface->h;
+	full_refresh_threshold_pct = XBIOS_ST_DEFAULT_FULL_REFRESH_PCT;
+	singlebuf_vsync_mode = XBIOS_ST_DEFAULT_SINGLEBUF_VSYNC;
+	XBIOS_ST_LoadPerfHints(&full_refresh_threshold_pct, &singlebuf_vsync_mode);
 
 	if (XBIOS_current->flags & XBIOSMODE_C2P) {
+		SDL_XBIOS_ST_SyncRenderMode(this);
 		const int st_render_mode = SDL_XBIOS_ST_GetRenderMode();
 
 		doubleline = (XBIOS_current->flags & XBIOSMODE_DOUBLELINE ? 1 : 0);
@@ -845,26 +999,59 @@ static void XBIOS_UpdateRects(_THIS, int numrects, SDL_Rect *rects)
 		use_st_dither = is_st_low4 && (st_render_mode != 0);
 		c2p_source = surface->pixels + src_offset;
 
-		if (is_st_low4 && (numrects > 1)) {
+		if (is_st_low4 && (numrects > 0)) {
 			merged_count = XBIOS_ST_CoalesceRects(
 				rects, numrects,
-				merged_rects, XBIOS_ST_MAX_BATCHED_RECTS
+				merged_rects, XBIOS_ST_MAX_BATCHED_RECTS,
+				surface->w, surface->h,
+				&dirty_area
 			);
 			if (merged_count >= 0) {
 				numrects = merged_count;
 			} else {
 				merged_count = 0;
+				if (use_st_dither) {
+					numrects = 0;
+					dirty_area = total_area;
+					force_full_refresh = 1;
+				}
 			}
 		}
 
-#ifndef DEBUG_VIDEO_XBIOS
+		if (!is_st_low4 && (numrects > 0)) {
+			for (i = 0; i < numrects; ++i) {
+				int rw;
+				int rh;
+
+				rw = rects[i].w;
+				rh = rects[i].h;
+				if ((rw > 0) && (rh > 0)) {
+					dirty_area += rw * rh;
+				}
+			}
+			if (dirty_area > total_area) {
+				dirty_area = total_area;
+			}
+		}
+
+		if (use_st_dither) {
+			force_full_refresh |= SDL_XBIOS_ST_ConsumeFullRefresh(this);
+			if (!force_full_refresh && (dirty_area > 0) &&
+			    XBIOS_ST_ShouldFullRefresh(dirty_area, total_area, full_refresh_threshold_pct)) {
+				force_full_refresh = 1;
+			}
+		}
+
+	#ifndef DEBUG_VIDEO_XBIOS
 		/* In single-buffer mode, align C2P writes to retrace to reduce tearing */
 		if ((surface->flags & SDL_DOUBLEBUF) != SDL_DOUBLEBUF) {
-			(*XBIOS_vsync)(this);
+			if (XBIOS_ST_ShouldSingleBufVsync(is_st_low4, dirty_area, total_area, singlebuf_vsync_mode)) {
+				(*XBIOS_vsync)(this);
+			}
 		}
-#endif
+	#endif
 
-		if (use_st_dither && SDL_XBIOS_ST_ConsumeFullRefresh(this)) {
+		if (use_st_dither && force_full_refresh) {
 			SDL_XBIOS_ST_DitherConvertRect(
 				this,
 				surface->pixels + src_offset,
@@ -875,6 +1062,7 @@ static void XBIOS_UpdateRects(_THIS, int numrects, SDL_Rect *rects)
 				XBIOS_pitch << doubleline
 			);
 			did_full_refresh = 1;
+			dirty_area = total_area;
 			numrects = 0;
 		}
 
@@ -918,7 +1106,9 @@ static void XBIOS_UpdateRects(_THIS, int numrects, SDL_Rect *rects)
 	}
 
 	if ((surface->flags & SDL_DOUBLEBUF) == SDL_DOUBLEBUF) {
-#ifndef DEBUG_VIDEO_XBIOS
+		int copy_back;
+
+	#ifndef DEBUG_VIDEO_XBIOS
 		if ((cookie_vdo >> 16) != VDO_F30) {
 			(*XBIOS_vsync)(this);
 
@@ -929,45 +1119,40 @@ static void XBIOS_UpdateRects(_THIS, int numrects, SDL_Rect *rects)
 
 			(*XBIOS_swapVbuffers)(this);
 		}
-#endif
+	#endif
 
 		XBIOS_fbnum ^= 1;
-		if (use_st_dither && XBIOS_ST_HasBlitter()) {
-			if (did_full_refresh) {
+		copy_back = !did_full_refresh && (numrects > 0);
+		if (copy_back && (dirty_area > 0) &&
+		    (dirty_area * 100 >= total_area * XBIOS_ST_COPYBACK_SKIP_PCT)) {
+			copy_back = 0;
+		}
+
+		if (copy_back && use_st_dither && XBIOS_ST_HasBlitter()) {
+			for (i = 0; i < numrects; ++i) {
+				if (merged_count > 0) {
+					x1 = merged_rects[i].x1;
+					x2 = merged_rects[i].x2;
+					y = merged_rects[i].y;
+					h = merged_rects[i].h;
+				} else {
+					x1 = rects[i].x & ~15;
+					x2 = rects[i].x + rects[i].w;
+					if (x2 & 15) {
+						x2 = (x2 | 15) +1;
+					}
+					y = rects[i].y;
+					h = rects[i].h;
+				}
+
 				XBIOS_ST_CopyRect(
 					XBIOS_screens[XBIOS_fbnum ^ 1],
 					XBIOS_screens[XBIOS_fbnum],
 					XBIOS_pitch << doubleline,
 					XBIOS_pitch << doubleline,
-					0, 0,
-					surface->w, surface->h
+					x1, y,
+					x2 - x1, h
 				);
-			} else {
-				for (i = 0; i < numrects; ++i) {
-					if (merged_count > 0) {
-						x1 = merged_rects[i].x1;
-						x2 = merged_rects[i].x2;
-						y = merged_rects[i].y;
-						h = merged_rects[i].h;
-					} else {
-						x1 = rects[i].x & ~15;
-						x2 = rects[i].x + rects[i].w;
-						if (x2 & 15) {
-							x2 = (x2 | 15) +1;
-						}
-						y = rects[i].y;
-						h = rects[i].h;
-					}
-
-					XBIOS_ST_CopyRect(
-						XBIOS_screens[XBIOS_fbnum ^ 1],
-						XBIOS_screens[XBIOS_fbnum],
-						XBIOS_pitch << doubleline,
-						XBIOS_pitch << doubleline,
-						x1, y,
-						x2 - x1, h
-					);
-				}
 			}
 		}
 		if (!XBIOS_shadowscreen) {
@@ -986,6 +1171,7 @@ static int XBIOS_FlipHWSurface(_THIS, SDL_Surface *surface)
 	int doubleline;
 	int use_st_dither;
 	int copy_x, copy_y, copy_w, copy_h;
+	int is_full_redraw;
 
 	doubleline = 0;
 	use_st_dither = 0;
@@ -993,6 +1179,7 @@ static int XBIOS_FlipHWSurface(_THIS, SDL_Surface *surface)
 	copy_y = 0;
 	copy_w = surface->w;
 	copy_h = surface->h;
+	is_full_redraw = 0;
 
 	if (this->shadow && !shadow_warning_shown) {
 		fprintf(stderr, "Warning: shadow buffer in use due to SDL_SetVideoMode(SDL_SWSURFACE)\n");
@@ -1000,6 +1187,7 @@ static int XBIOS_FlipHWSurface(_THIS, SDL_Surface *surface)
 	}
 
 	if (XBIOS_current->flags & XBIOSMODE_C2P) {
+		SDL_XBIOS_ST_SyncRenderMode(this);
 		const int st_render_mode = SDL_XBIOS_ST_GetRenderMode();
 
 		doubleline = (XBIOS_current->flags & XBIOSMODE_DOUBLELINE ? 1 : 0);
@@ -1015,6 +1203,8 @@ static int XBIOS_FlipHWSurface(_THIS, SDL_Surface *surface)
 			copy_w = (copy_w | 15) + 1;
 		}
 		copy_h = surface->h;
+		is_full_redraw = (copy_x <= 0) && (copy_y <= 0) &&
+				 (copy_w >= surface->w) && (copy_h >= surface->h);
 		if (use_st_dither) {
 			SDL_XBIOS_ST_DitherConvertRect(
 				this, surface->pixels + src_offset,
@@ -1048,10 +1238,10 @@ static int XBIOS_FlipHWSurface(_THIS, SDL_Surface *surface)
 
 			(*XBIOS_swapVbuffers)(this);
 		}
-#endif
+	#endif
 
 		XBIOS_fbnum ^= 1;
-		if (use_st_dither && XBIOS_ST_HasBlitter()) {
+		if (use_st_dither && !is_full_redraw && XBIOS_ST_HasBlitter()) {
 			XBIOS_ST_CopyRect(
 				XBIOS_screens[XBIOS_fbnum ^ 1],
 				XBIOS_screens[XBIOS_fbnum],

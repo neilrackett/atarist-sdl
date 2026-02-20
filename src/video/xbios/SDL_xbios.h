@@ -169,6 +169,7 @@ void SDL_XBIOS_AddMode(_THIS, int actually_add, const xbiosmode_t *modeinfo);
 void SDL_XBIOS_VideoInit_ST(_THIS, unsigned long cookie_cvdo);
 void SDL_XBIOS_ST_DitherConvertRect(_THIS, const Uint8 *src, Uint8 *dst, int x, int y, int w, int h, int srcpitch, int dstpitch);
 int SDL_XBIOS_ST_ConsumeFullRefresh(_THIS);
+void SDL_XBIOS_ST_SyncRenderMode(_THIS);
 int SDL_XBIOS_ST_GetRenderMode(void);
 
 /* SDL_xbios_tt.c */
