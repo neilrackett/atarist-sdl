@@ -35,7 +35,6 @@
 
 #include <stdio.h>
 
-#include <mint/cookie.h>
 #include <mint/osbind.h>
 
 #include "../SDL_sysvideo.h"
@@ -120,6 +119,13 @@ static int setColors(_THIS, int firstcolor, int ncolors, SDL_Color *colors);
 static void updateGrayPalette(_THIS);
 static void updateRects_ST(_THIS, int numrects, SDL_Rect *rects);
 static int flipHWSurface_ST(_THIS, SDL_Surface *surface);
+static void initColorTable(void);
+static void maybeWarnShadowBuffer(_THIS);
+static int isColorRenderMode(void);
+static int isStLow4Mode(_THIS);
+static void getUpdateRect(const SDL_Rect *rects, const xbiosstrect_t *merged_rects, int merged_count, int idx, int *x1, int *x2, int *y, int *h);
+static void swapBuffers(_THIS);
+static void syncSurfacePixels(_THIS, SDL_Surface *surface);
 
 static __inline__ int colorDist(SDL_Color c1, SDL_Color c2)
 {
@@ -539,6 +545,75 @@ static void loadPerfHints(void)
 	);
 }
 
+static void initColorTable(void)
+{
+	int i;
+
+	for (i = 0; i < 256; ++i) {
+		st_colors[i].r = i;
+		st_colors[i].g = i;
+		st_colors[i].b = i;
+		st_colors[i].unused = 0;
+	}
+	st_colors_init = 1;
+}
+
+static void maybeWarnShadowBuffer(_THIS)
+{
+	if (this->shadow && !st_shadow_warning_shown) {
+		fprintf(stderr, "Warning: shadow buffer in use due to SDL_SetVideoMode(SDL_SWSURFACE)\n");
+		st_shadow_warning_shown = SDL_TRUE;
+	}
+}
+
+static int isColorRenderMode(void)
+{
+	return (st_render_mode == ST_RENDER_COLOR);
+}
+
+static int isStLow4Mode(_THIS)
+{
+	return (XBIOS_current->depth == 4) && (XBIOS_current->number == (ST_LOW >> 8));
+}
+
+static void getUpdateRect(const SDL_Rect *rects, const xbiosstrect_t *merged_rects, int merged_count, int idx, int *x1, int *x2, int *y, int *h)
+{
+	if (merged_count > 0) {
+		*x1 = merged_rects[idx].x1;
+		*x2 = merged_rects[idx].x2;
+		*y = merged_rects[idx].y;
+		*h = merged_rects[idx].h;
+		return;
+	}
+
+	*x1 = rects[idx].x & ~15;
+	*x2 = rects[idx].x + rects[idx].w;
+	if (*x2 & 15) {
+		*x2 = (*x2 | 15) +1;
+	}
+	*y = rects[idx].y;
+	*h = rects[idx].h;
+}
+
+static void swapBuffers(_THIS)
+{
+#ifndef DEBUG_VIDEO_XBIOS
+	(*XBIOS_vsync)(this);
+	(*XBIOS_swapVbuffers)(this);
+#endif
+	XBIOS_fbnum ^= 1;
+}
+
+static void syncSurfacePixels(_THIS, SDL_Surface *surface)
+{
+	int src_offset;
+
+	if (!XBIOS_shadowscreen) {
+		src_offset = (surface->locked ? surface->offset : 0);
+		surface->pixels=((Uint8 *) XBIOS_screens[XBIOS_fbnum]) + src_offset;
+	}
+}
+
 static int shouldFullRefresh(int dirty_area, int total_area)
 {
 	return (dirty_area * 100) >= (total_area * xbios_st_full_refresh_threshold_pct);
@@ -858,10 +933,7 @@ static void updateRects_ST(_THIS, int numrects, SDL_Rect *rects)
 	int total_area;
 	xbiosstrect_t merged_rects[XBIOS_ST_MAX_BATCHED_RECTS];
 
-	if (this->shadow && !st_shadow_warning_shown) {
-		fprintf(stderr, "Warning: shadow buffer in use due to SDL_SetVideoMode(SDL_SWSURFACE)\n");
-		st_shadow_warning_shown = SDL_TRUE;
-	}
+	maybeWarnShadowBuffer(this);
 
 	src_offset = (surface->locked ? -surface->offset : 0);
 	did_full_refresh = 0;
@@ -875,8 +947,8 @@ static void updateRects_ST(_THIS, int numrects, SDL_Rect *rects)
 
 	if (XBIOS_current->flags & XBIOSMODE_C2P) {
 		doubleline = (XBIOS_current->flags & XBIOSMODE_DOUBLELINE ? 1 : 0);
-		is_st_low4 = (XBIOS_current->depth == 4) && (XBIOS_current->number == (ST_LOW >> 8));
-		use_st_dither = is_st_low4 && (st_render_mode == ST_RENDER_COLOR);
+		is_st_low4 = isStLow4Mode(this);
+		use_st_dither = is_st_low4 && isColorRenderMode();
 		c2p_source = surface->pixels + src_offset;
 
 		if (is_st_low4 && (numrects > 0)) {
@@ -945,20 +1017,7 @@ static void updateRects_ST(_THIS, int numrects, SDL_Rect *rects)
 		}
 
 		for (i=0;i<numrects;i++) {
-			if (merged_count > 0) {
-				x1 = merged_rects[i].x1;
-				x2 = merged_rects[i].x2;
-				y = merged_rects[i].y;
-				h = merged_rects[i].h;
-			} else {
-				x1 = rects[i].x & ~15;
-				x2 = rects[i].x + rects[i].w;
-				if (x2 & 15) {
-					x2 = (x2 | 15) +1;
-				}
-				y = rects[i].y;
-				h = rects[i].h;
-			}
+			getUpdateRect(rects, merged_rects, merged_count, i, &x1, &x2, &y, &h);
 
 			if (use_st_dither) {
 				ditherConvertRect(
@@ -985,12 +1044,7 @@ static void updateRects_ST(_THIS, int numrects, SDL_Rect *rects)
 	if ((surface->flags & SDL_DOUBLEBUF) == SDL_DOUBLEBUF) {
 		int copy_back;
 
-#ifndef DEBUG_VIDEO_XBIOS
-		(*XBIOS_vsync)(this);
-		(*XBIOS_swapVbuffers)(this);
-#endif
-
-		XBIOS_fbnum ^= 1;
+		swapBuffers(this);
 		copy_back = !did_full_refresh && (numrects > 0);
 		if (copy_back && (dirty_area > 0) &&
 		    (dirty_area * 100 >= total_area * XBIOS_ST_COPYBACK_SKIP_PCT)) {
@@ -999,20 +1053,7 @@ static void updateRects_ST(_THIS, int numrects, SDL_Rect *rects)
 
 		if (copy_back && use_st_dither && hasBlitter()) {
 			for (i = 0; i < numrects; ++i) {
-				if (merged_count > 0) {
-					x1 = merged_rects[i].x1;
-					x2 = merged_rects[i].x2;
-					y = merged_rects[i].y;
-					h = merged_rects[i].h;
-				} else {
-					x1 = rects[i].x & ~15;
-					x2 = rects[i].x + rects[i].w;
-					if (x2 & 15) {
-						x2 = (x2 | 15) +1;
-					}
-					y = rects[i].y;
-					h = rects[i].h;
-				}
+				getUpdateRect(rects, merged_rects, merged_count, i, &x1, &x2, &y, &h);
 
 				copyRect(
 					XBIOS_screens[XBIOS_fbnum ^ 1],
@@ -1024,10 +1065,7 @@ static void updateRects_ST(_THIS, int numrects, SDL_Rect *rects)
 				);
 			}
 		}
-		if (!XBIOS_shadowscreen) {
-			src_offset = (surface->locked ? surface->offset : 0);
-			surface->pixels=((Uint8 *) XBIOS_screens[XBIOS_fbnum]) + src_offset;
-		}
+		syncSurfacePixels(this, surface);
 	}
 }
 
@@ -1050,15 +1088,11 @@ static int flipHWSurface_ST(_THIS, SDL_Surface *surface)
 	copy_h = surface->h;
 	is_full_redraw = 0;
 
-	if (this->shadow && !st_shadow_warning_shown) {
-		fprintf(stderr, "Warning: shadow buffer in use due to SDL_SetVideoMode(SDL_SWSURFACE)\n");
-		st_shadow_warning_shown = SDL_TRUE;
-	}
+	maybeWarnShadowBuffer(this);
 
 	if (XBIOS_current->flags & XBIOSMODE_C2P) {
 		doubleline = (XBIOS_current->flags & XBIOSMODE_DOUBLELINE ? 1 : 0);
-		use_st_dither = (XBIOS_current->depth == 4) && (XBIOS_current->number == (ST_LOW >> 8)) &&
-				(st_render_mode == ST_RENDER_COLOR);
+		use_st_dither = isStLow4Mode(this) && isColorRenderMode();
 
 		dst_offset = this->offset_y * (XBIOS_pitch << doubleline) +
 				(this->offset_x & ~15) * XBIOS_current->depth / 8;
@@ -1093,12 +1127,7 @@ static int flipHWSurface_ST(_THIS, SDL_Surface *surface)
 	}
 
 	if ((surface->flags & SDL_DOUBLEBUF) == SDL_DOUBLEBUF) {
-#ifndef DEBUG_VIDEO_XBIOS
-		(*XBIOS_vsync)(this);
-		(*XBIOS_swapVbuffers)(this);
-#endif
-
-		XBIOS_fbnum ^= 1;
+		swapBuffers(this);
 		if (use_st_dither && !is_full_redraw && hasBlitter()) {
 			copyRect(
 				XBIOS_screens[XBIOS_fbnum ^ 1],
@@ -1108,10 +1137,7 @@ static int flipHWSurface_ST(_THIS, SDL_Surface *surface)
 				copy_x, copy_y, copy_w, copy_h
 			);
 		}
-		if (!XBIOS_shadowscreen) {
-			src_offset = (surface->locked ? surface->offset : 0);
-			surface->pixels=((Uint8 *) XBIOS_screens[XBIOS_fbnum]) + src_offset;
-		}
+		syncSurfacePixels(this, surface);
 	}
 
 	return(0);
@@ -1120,7 +1146,6 @@ static int flipHWSurface_ST(_THIS, SDL_Surface *surface)
 void SDL_XBIOS_VideoInit_ST(_THIS, unsigned long cookie_cvdo)
 {
 	const char *mode;
-	int i;
 
 	mode = SDL_getenv("SDL_XBIOS_ST_RENDER_MODE");
 	if (mode == NULL || *mode == '\0') {
@@ -1132,13 +1157,7 @@ void SDL_XBIOS_VideoInit_ST(_THIS, unsigned long cookie_cvdo)
 		st_render_mode = ST_RENDER_COLOR;
 	}
 
-	for (i = 0; i < 256; ++i) {
-		st_colors[i].r = i;
-		st_colors[i].g = i;
-		st_colors[i].b = i;
-		st_colors[i].unused = 0;
-	}
-	st_colors_init = 1;
+	initColorTable();
 
 	updateGrayPalette(this);
 	st_palette_init = 0;
@@ -1176,6 +1195,7 @@ static void listModes(_THIS, int actually_add)
 
 static void saveMode(_THIS, SDL_PixelFormat *vformat)
 {
+	(void)vformat;
 	XBIOS_oldvbase=Physbase();
 	XBIOS_oldvmode=Getrez();
 }
@@ -1225,11 +1245,13 @@ static void vsync_ST(_THIS)
 
 static void getScreenFormat(_THIS, int bpp, Uint32 *rmask, Uint32 *gmask, Uint32 *bmask, Uint32 *amask)
 {
+	(void)bpp;
 	*rmask = *gmask = *bmask = *amask = 0;
 }
 
 static int getLineWidth(_THIS, const xbiosmode_t *new_video_mode, int width, int bpp)
 {
+	(void)new_video_mode;
 	if (bpp==4) {
 		return (width >> 1);
 	}
@@ -1245,6 +1267,7 @@ static void swapVbuffers(_THIS)
 static int allocVbuffers(_THIS, const xbiosmode_t *new_video_mode, int num_buffers, int bufsize)
 {
 	int i;
+	(void)new_video_mode;
 
 	for (i=0; i<num_buffers; i++) {
 		XBIOS_screensmem[i] = Atari_SysMalloc(bufsize, MX_STRAM);
@@ -1282,13 +1305,7 @@ static int setColors(_THIS, int firstcolor, int ncolors, SDL_Color *colors)
 	int remap_needed;
 
 	if (!st_colors_init) {
-		for (i = 0; i < 256; ++i) {
-			st_colors[i].r = i;
-			st_colors[i].g = i;
-			st_colors[i].b = i;
-			st_colors[i].unused = 0;
-		}
-		st_colors_init = 1;
+		initColorTable();
 	}
 
 	if (firstcolor < 0) {
@@ -1324,7 +1341,7 @@ static int setColors(_THIS, int firstcolor, int ncolors, SDL_Color *colors)
 		return(1);
 	}
 
-	if (st_render_mode != ST_RENDER_COLOR) {
+	if (!isColorRenderMode()) {
 		updateGrayPalette(this);
 		st_force_full_refresh = 1;
 		return(1);
