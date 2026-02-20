@@ -87,6 +87,7 @@ static int st_colors_init = 0;
 static int st_palette_init = 0;
 static Uint8 st_palette_source[16];
 static Uint8 st_palette_used[256];
+static int st_palette_source_count = 16;
 static Uint8 st_dither_map[16][256];
 static const Uint8 *st_dither_phase_maps[4][16];
 static SDL_bool st_shadow_warning_shown;
@@ -116,18 +117,6 @@ static void swapVbuffers(_THIS);
 static int allocVbuffers(_THIS, const xbiosmode_t *new_video_mode, int num_buffers, int bufsize);
 static void freeVbuffers(_THIS);
 static int setColors(_THIS, int firstcolor, int ncolors, SDL_Color *colors);
-static void updateGrayPalette(_THIS);
-static void updateRects_ST(_THIS, int numrects, SDL_Rect *rects);
-static int flipHWSurface_ST(_THIS, SDL_Surface *surface);
-static void initColorTable(void);
-static void initDitherPhaseMaps(void);
-static void maybeWarnShadowBuffer(_THIS);
-static int isColorRenderMode(void);
-static int isStLow4Mode(_THIS);
-static void getUpdateRect(const SDL_Rect *rects, const xbiosstrect_t *merged_rects, int merged_count, int idx, int *x1, int *x2, int *y, int *h);
-static int sumRectArea(const SDL_Rect *rects, int numrects, int max_area);
-static void swapBuffers(_THIS);
-static void syncSurfacePixels(_THIS, SDL_Surface *surface);
 
 static __inline__ int colorDist(SDL_Color c1, SDL_Color c2)
 {
@@ -156,47 +145,6 @@ static __inline__ int colorGray(SDL_Color color)
 static __inline__ Uint32 colorKey(SDL_Color color)
 {
 	return ((Uint32)color.r << 16) | ((Uint32)color.g << 8) | (Uint32)color.b;
-}
-
-static int isUniformPalette(const SDL_Color *colors, int ncolors)
-{
-	int i;
-	Uint8 r, g, b;
-
-	if (ncolors <= 0) {
-		return 1;
-	}
-
-	r = colors[0].r;
-	g = colors[0].g;
-	b = colors[0].b;
-	for (i = 1; i < ncolors; ++i) {
-		if ((colors[i].r != r) || (colors[i].g != g) || (colors[i].b != b)) {
-			return 0;
-		}
-	}
-
-	return 1;
-}
-
-static int paletteSourceCount(void)
-{
-	int i, j;
-	int count;
-
-	count = 0;
-	for (i = 0; i < 16; ++i) {
-		for (j = 0; j < i; ++j) {
-			if (st_palette_source[i] == st_palette_source[j]) {
-				break;
-			}
-		}
-		if (j == i) {
-			count++;
-		}
-	}
-
-	return count;
 }
 
 static void setHardwarePalette(_THIS)
@@ -244,6 +192,7 @@ static int updatePaletteExact(_THIS)
 
 	SDL_memset(st_palette_used, 0, sizeof(st_palette_used));
 	st_map_used_count = exact_count;
+	st_palette_source_count = exact_count;
 	for (i = 0; i < 16; ++i) {
 		int src;
 
@@ -397,15 +346,24 @@ static void updatePalette(_THIS, int refine_palette)
 		}
 	}
 
+	SDL_memset(st_palette_used, 0, sizeof(st_palette_used));
+	st_palette_source_count = 0;
 	for (i = 0; i < 16; ++i) {
+		int j;
+
 		if (!inverse_found[i]) {
-			inverse_map[i] = i;
+			inverse_map[i] = (Uint8)i;
 		}
 		st_palette_source[i] = inverse_map[i];
-	}
-	SDL_memset(st_palette_used, 0, sizeof(st_palette_used));
-	for (i = 0; i < 16; ++i) {
 		st_palette_used[st_palette_source[i]] = 1;
+		for (j = 0; j < i; ++j) {
+			if (st_palette_source[j] == st_palette_source[i]) {
+				break;
+			}
+		}
+		if (j == i) {
+			st_palette_source_count++;
+		}
 	}
 
 	setHardwarePalette(this);
@@ -434,6 +392,7 @@ static void updateGrayPalette(_THIS)
 		st_palette_used[st_palette_source[i]] = 1;
 	}
 	st_map_used_count = 16;
+	st_palette_source_count = 16;
 
 	for (i = 0; i < 256; ++i) {
 		int gray, base;
@@ -481,15 +440,6 @@ static void ditherConvertRect(const Uint8 *src, Uint8 *dst, int x, int y, int w,
 	);
 }
 
-static int consumeFullRefresh(void)
-{
-	int refresh;
-
-	refresh = st_force_full_refresh;
-	st_force_full_refresh = 0;
-	return refresh;
-}
-
 static int parseEnvInt(const char *name, int default_value, int min_value, int max_value)
 {
 	const char *envr;
@@ -528,15 +478,15 @@ static void initDitherPhaseMaps(void)
 {
 	int col;
 	int row;
+	int i;
 
 	for (col = 0; col < 4; ++col) {
 		for (row = 0; row < 4; ++row) {
 			const int phase = row << 2;
 
-			st_dither_phase_maps[col][phase + 0] = st_dither_map[phase | ((col + 0) & 3)];
-			st_dither_phase_maps[col][phase + 1] = st_dither_map[phase | ((col + 1) & 3)];
-			st_dither_phase_maps[col][phase + 2] = st_dither_map[phase | ((col + 2) & 3)];
-			st_dither_phase_maps[col][phase + 3] = st_dither_map[phase | ((col + 3) & 3)];
+			for (i = 0; i < 4; ++i) {
+				st_dither_phase_maps[col][phase + i] = st_dither_map[phase | ((col + i) & 3)];
+			}
 		}
 	}
 }
@@ -628,27 +578,6 @@ static void syncSurfacePixels(_THIS, SDL_Surface *surface)
 		src_offset = (surface->locked ? surface->offset : 0);
 		surface->pixels=((Uint8 *) XBIOS_screens[XBIOS_fbnum]) + src_offset;
 	}
-}
-
-static int shouldFullRefresh(int dirty_area, int total_area)
-{
-	return (dirty_area * 100) >= (total_area * xbios_st_full_refresh_threshold_pct);
-}
-
-static int shouldSingleBufVsync(int is_lowres, int dirty_area, int total_area)
-{
-	if (!is_lowres) {
-		return 1;
-	}
-
-	if (xbios_st_singlebuf_vsync_mode <= 0) {
-		return 0;
-	}
-	if (xbios_st_singlebuf_vsync_mode >= 2) {
-		return (dirty_area * 100) <= (total_area * XBIOS_ST_ADAPTIVE_VSYNC_PCT);
-	}
-
-	return 1;
 }
 
 static int hasBlitter(void)
@@ -764,11 +693,9 @@ static int alignRect(const SDL_Rect *rect, int max_w, int max_h, xbiosstrect_t *
 	}
 
 	x1 &= ~(XBIOS_ST_TILE_WIDTH - 1);
-	if (x2 & (XBIOS_ST_TILE_WIDTH - 1)) {
-		x2 = (x2 + XBIOS_ST_TILE_WIDTH - 1) & ~(XBIOS_ST_TILE_WIDTH - 1);
-		if (x2 > max_w) {
-			x2 = max_w;
-		}
+	x2 = (x2 + XBIOS_ST_TILE_WIDTH - 1) & ~(XBIOS_ST_TILE_WIDTH - 1);
+	if (x2 > max_w) {
+		x2 = max_w;
 	}
 
 	out->x1 = x1;
@@ -843,11 +770,15 @@ static int coalesceRects(const SDL_Rect *rects, int numrects, xbiosstrect_t *mer
 			int x1, x2;
 			Uint32 span_mask;
 
+#if defined(__GNUC__)
+			xbin1 = __builtin_ctzl((unsigned long)mask);
+#else
 			for (xbin1 = 0; xbin1 < cols; ++xbin1) {
 				if (mask & ((Uint32)1 << xbin1)) {
 					break;
 				}
 			}
+#endif
 			if (xbin1 >= cols) {
 				break;
 			}
@@ -967,7 +898,8 @@ static void updateRects_ST(_THIS, int numrects, SDL_Rect *rects)
 		c2p_source = surface->pixels + src_offset;
 
 		if (use_dither) {
-			force_full_refresh = consumeFullRefresh();
+			force_full_refresh = st_force_full_refresh;
+			st_force_full_refresh = 0;
 		}
 
 		if (!force_full_refresh) {
@@ -1007,7 +939,8 @@ static void updateRects_ST(_THIS, int numrects, SDL_Rect *rects)
 				dirty_area = sumRectArea(rects, numrects, total_area);
 			}
 
-			if (use_dither && (dirty_area > 0) && shouldFullRefresh(dirty_area, total_area)) {
+			if (use_dither && (dirty_area > 0) &&
+			    (dirty_area * 100 >= total_area * xbios_st_full_refresh_threshold_pct)) {
 				force_full_refresh = 1;
 			}
 		} else if (use_dither) {
@@ -1017,7 +950,19 @@ static void updateRects_ST(_THIS, int numrects, SDL_Rect *rects)
 
 #ifndef DEBUG_VIDEO_XBIOS
 		if ((surface->flags & SDL_DOUBLEBUF) != SDL_DOUBLEBUF) {
-			if (shouldSingleBufVsync(is_lowres, dirty_area, total_area)) {
+			int do_vsync;
+
+			do_vsync = !is_lowres;
+			if (is_lowres) {
+				if (xbios_st_singlebuf_vsync_mode <= 0) {
+					do_vsync = 0;
+				} else if (xbios_st_singlebuf_vsync_mode >= 2) {
+					do_vsync = (dirty_area * 100) <= (total_area * XBIOS_ST_ADAPTIVE_VSYNC_PCT);
+				} else {
+					do_vsync = 1;
+				}
+			}
+			if (do_vsync) {
 				(*XBIOS_vsync)(this);
 			}
 		}
@@ -1328,7 +1273,6 @@ static int setColors(_THIS, int firstcolor, int ncolors, SDL_Color *colors)
 	int i;
 	int changed;
 	int palette_changed;
-	int remap_needed;
 
 	if (!st_colors_init) {
 		initColorTable();
@@ -1349,7 +1293,6 @@ static int setColors(_THIS, int firstcolor, int ncolors, SDL_Color *colors)
 
 	if (!isColorRenderMode()) {
 		extern Uint8 SDL_Atari_C2pPalette4[256];
-		const int remap_all = !st_palette_init;
 
 		for (i = 0; i < ncolors; i++) {
 			SDL_Color *src, *dst;
@@ -1357,10 +1300,8 @@ static int setColors(_THIS, int firstcolor, int ncolors, SDL_Color *colors)
 
 			src = &colors[i];
 			dst = &st_colors[firstcolor+i];
-			if (!remap_all) {
-				if ((dst->r == src->r) && (dst->g == src->g) && (dst->b == src->b)) {
-					continue;
-				}
+			if ((dst->r == src->r) && (dst->g == src->g) && (dst->b == src->b)) {
+				continue;
 			}
 			*dst = *src;
 
@@ -1374,37 +1315,46 @@ static int setColors(_THIS, int firstcolor, int ncolors, SDL_Color *colors)
 		return(1);
 	}
 
-	changed = !st_palette_init;
-	palette_changed = !st_palette_init;
+	changed = palette_changed = !st_palette_init;
 	for (i = 0; i < ncolors; i++) {
 		SDL_Color *src, *dst;
 
 		src = &colors[i];
 		dst = &st_colors[firstcolor+i];
-		if ((dst->r != src->r) || (dst->g != src->g) || (dst->b != src->b)) {
-			if (st_palette_used[firstcolor+i]) {
-				palette_changed = 1;
-			}
-
-			*dst = *src;
-			changed = 1;
+		if ((dst->r == src->r) && (dst->g == src->g) && (dst->b == src->b)) {
+			continue;
 		}
+		if (st_palette_used[firstcolor+i]) {
+			palette_changed = 1;
+		}
+		*dst = *src;
+		changed = 1;
 	}
 	if (!changed) {
 		return(1);
 	}
 
-	if (!st_palette_init && firstcolor == 0 && ncolors >= 256 && isUniformPalette(colors, 256)) {
-		Uint16 component;
+	if (!st_palette_init && firstcolor == 0 && ncolors >= 256) {
+		SDL_Color color0;
 
-		component = (ataricomponent(colors[0].r) << 8)
-			  | (ataricomponent(colors[0].g) << 4)
-			  | (ataricomponent(colors[0].b));
-		for (i = 0; i < 16; ++i) {
-			TT_palette[i] = component;
+		color0 = colors[0];
+		for (i = 1; i < 256; ++i) {
+			if ((colors[i].r != color0.r) || (colors[i].g != color0.g) || (colors[i].b != color0.b)) {
+				break;
+			}
 		}
-		Setpalette(TT_palette);
-		return(1);
+		if (i == 256) {
+			Uint16 component;
+
+			component = (ataricomponent(color0.r) << 8)
+				  | (ataricomponent(color0.g) << 4)
+				  | (ataricomponent(color0.b));
+			for (i = 0; i < 16; ++i) {
+				TT_palette[i] = component;
+			}
+			Setpalette(TT_palette);
+			return(1);
+		}
 	}
 
 	if (!st_palette_init) {
@@ -1413,16 +1363,9 @@ static int setColors(_THIS, int firstcolor, int ncolors, SDL_Color *colors)
 		return(1);
 	}
 
-	remap_needed = 0;
-	if (ncolors >= ST_REMAP_CHANGE_THRESHOLD) {
-		remap_needed = 1;
-	} else if (st_map_used_count < 4) {
-		remap_needed = 1;
-	} else if (paletteSourceCount() < 4) {
-		remap_needed = 1;
-	}
-
-	if (remap_needed) {
+	if ((ncolors >= ST_REMAP_CHANGE_THRESHOLD) ||
+	    (st_map_used_count < 4) ||
+	    (st_palette_source_count < 4)) {
 		updatePalette(this, 0);
 		st_force_full_refresh = 1;
 	} else if (palette_changed) {
