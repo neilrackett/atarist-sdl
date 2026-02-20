@@ -79,7 +79,7 @@ int main(int argc, char *argv[]);
 static int use_compact_palette;
 
 typedef struct {
-	int render_mode;
+	const char *render_mode;
 	int full_refresh_pct;
 	int singlebuf_vsync;
 } BenchCombo;
@@ -125,6 +125,12 @@ static int BenchArgSkipInSweep(const char *arg)
 static int BenchIsNumericArg(const char *arg)
 {
 	return arg && *arg && isdigit((unsigned char)arg[0]);
+}
+
+static void BenchSetEnvStr(char *envbuf, int envbuf_len, const char *name, const char *value)
+{
+	SDL_snprintf(envbuf, envbuf_len, "%s=%s", name, value);
+	SDL_putenv(envbuf);
 }
 
 static void BenchSetEnvInt(char *envbuf, int envbuf_len, const char *name, int value)
@@ -277,41 +283,23 @@ static int RunBenchSweep(int argc, char *argv[])
 	/* BenchSweepCase format:
 	   {{SDL_XBIOS_ST_RENDER_MODE, SDL_XBIOS_ST_FULL_REFRESH_PCT, SDL_XBIOS_ST_SINGLEBUF_VSYNC}, use_compact_palette} */
 	static const BenchSweepCase cases[] = {
-		{{2, 100, 2}, 0},
-		{{2, 85, 2}, 0},
-		{{2, 60, 2}, 0},
-		{{2, 40, 2}, 0},
-		{{2, 25, 2}, 0},
+		{{"color", 100, 2}, 0},
+		{{"color", 85, 2}, 0},
+		{{"color", 60, 2}, 0},
+		{{"color", 40, 2}, 0},
+		{{"color", 25, 2}, 0},
 
-		{{2, 100, 1}, 0},
-		{{2, 85, 1}, 0},
-		{{2, 60, 1}, 0},
-		{{2, 40, 1}, 0},
-		{{2, 25, 1}, 0},
+		{{"color", 100, 1}, 0},
+		{{"color", 85, 1}, 0},
+		{{"color", 60, 1}, 0},
+		{{"color", 40, 1}, 0},
+		{{"color", 25, 1}, 0},
 
-		{{2, 100, 0}, 0},
-		{{2, 85, 0}, 0},
-		{{2, 60, 0}, 0},
-		{{2, 40, 0}, 0},
-		{{2, 25, 0}, 0},
-
-		{{2, 100, 2}, 1},
-		{{2, 85, 2}, 1},
-		{{2, 60, 2}, 1},
-		{{2, 40, 2}, 1},
-		{{2, 25, 2}, 1},
-
-		{{1, 100, 2}, 1},
-		{{1, 85, 2}, 1},
-		{{1, 60, 2}, 1},
-		{{1, 40, 2}, 1},
-		{{1, 25, 2}, 1},
-
-		{{0, 100, 2}, 1},
-		{{0, 85, 2}, 1},
-		{{0, 60, 2}, 1},
-		{{0, 40, 2}, 1},
-		{{0, 25, 2}, 1}
+		{{"grayscale", 100, 2}, 1},
+		{{"grayscale", 85, 2}, 1},
+		{{"grayscale", 60, 2}, 1},
+		{{"grayscale", 40, 2}, 1},
+		{{"grayscale", 25, 2}, 1}
 	};
 	static const BenchCpuPass megaste_cpu_passes[BENCH_MAX_CPU_PASSES] = {
 		{0x00, "8mhz"},
@@ -331,7 +319,7 @@ static int RunBenchSweep(int argc, char *argv[])
 	Uint8 saved_speedreg;
 	Uint8 applied_speedreg;
 	const char *cpu_label;
-	int prev_render_mode;
+	const char *prev_render_mode;
 	int prev_full_refresh_pct;
 	int prev_singlebuf_vsync;
 
@@ -343,7 +331,7 @@ static int RunBenchSweep(int argc, char *argv[])
 	saved_speedreg = 0;
 	applied_speedreg = 0;
 	cpu_label = "default";
-	prev_render_mode = -1;
+	prev_render_mode = NULL;
 	prev_full_refresh_pct = -1;
 	prev_singlebuf_vsync = -1;
 	child_argc = BuildSweepChildArgs(argc, argv, child_argv, (int)(sizeof(child_argv) / sizeof(child_argv[0])));
@@ -375,8 +363,8 @@ static int RunBenchSweep(int argc, char *argv[])
 			unsigned long frames, elapsed_ms;
 			int run_argc;
 
-			if (cases[s].combo.render_mode != prev_render_mode) {
-				BenchSetEnvInt(env_render, sizeof(env_render), "SDL_XBIOS_ST_RENDER_MODE", cases[s].combo.render_mode);
+			if (!prev_render_mode || (strcmp(cases[s].combo.render_mode, prev_render_mode) != 0)) {
+				BenchSetEnvStr(env_render, sizeof(env_render), "SDL_XBIOS_ST_RENDER_MODE", cases[s].combo.render_mode);
 				prev_render_mode = cases[s].combo.render_mode;
 			}
 			if (cases[s].combo.full_refresh_pct != prev_full_refresh_pct) {
@@ -435,7 +423,7 @@ static int RunBenchSweep(int argc, char *argv[])
 
 	BenchPrintf("\n## Ranked Results\n\n");
 	BenchPrintf("| Rank | CPU | SDL_XBIOS_ST_RENDER_MODE | SDL_XBIOS_ST_FULL_REFRESH_PCT | SDL_XBIOS_ST_SINGLEBUF_VSYNC | use_compact_palette | Status | FPS | Frames | Elapsed ms |\n");
-	BenchPrintf("| ---: | --- | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: |\n");
+	BenchPrintf("| ---: | --- | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: |\n");
 	{
 		int best_8mhz;
 		int best_16mhz;
@@ -465,7 +453,7 @@ static int RunBenchSweep(int argc, char *argv[])
 			highlight = (idx == best_8mhz) || (idx == best_16mhz);
 			if (results[idx].ok) {
 				if (highlight) {
-					BenchPrintf("| **%d** | **%s** | **%d** | **%d** | **%d** | **%d** | **OK** | **%.2f** | **%lu** | **%lu** |\n",
+					BenchPrintf("| **%d** | **%s** | **%s** | **%d** | **%d** | **%d** | **OK** | **%.2f** | **%lu** | **%lu** |\n",
 						i + 1,
 						results[idx].cpu_label,
 						results[idx].combo.render_mode,
@@ -476,7 +464,7 @@ static int RunBenchSweep(int argc, char *argv[])
 						results[idx].frames,
 						results[idx].elapsed_ms);
 				} else {
-					BenchPrintf("| %d | %s | %d | %d | %d | %d | OK | %.2f | %lu | %lu |\n",
+					BenchPrintf("| %d | %s | %s | %d | %d | %d | OK | %.2f | %lu | %lu |\n",
 						i + 1,
 						results[idx].cpu_label,
 						results[idx].combo.render_mode,
@@ -488,7 +476,7 @@ static int RunBenchSweep(int argc, char *argv[])
 						results[idx].elapsed_ms);
 				}
 			} else {
-				BenchPrintf("| %d | %s | %d | %d | %d | %d | FAILED | - | - | - |\n",
+				BenchPrintf("| %d | %s | %s | %d | %d | %d | FAILED | - | - | - |\n",
 					i + 1,
 					results[idx].cpu_label,
 					results[idx].combo.render_mode,
@@ -942,7 +930,7 @@ int main(int argc, char *argv[])
 			strcpy(video_driver, "unknown");
 		}
 		BenchPrintf("Video driver: %s\n", video_driver);
-		BenchPrintf("ST settings: SDL_XBIOS_ST_RENDER_MODE=%s (default 2), SDL_XBIOS_ST_FULL_REFRESH_PCT=%s (default 60), SDL_XBIOS_ST_SINGLEBUF_VSYNC=%s (default 2)\n",
+		BenchPrintf("ST settings: SDL_XBIOS_ST_RENDER_MODE=%s (default color), SDL_XBIOS_ST_FULL_REFRESH_PCT=%s (default 60), SDL_XBIOS_ST_SINGLEBUF_VSYNC=%s (default 2)\n",
 			BenchEnvOrDefault("SDL_XBIOS_ST_RENDER_MODE", "<default>"),
 			BenchEnvOrDefault("SDL_XBIOS_ST_FULL_REFRESH_PCT", "<default>"),
 			BenchEnvOrDefault("SDL_XBIOS_ST_SINGLEBUF_VSYNC", "<default>"));

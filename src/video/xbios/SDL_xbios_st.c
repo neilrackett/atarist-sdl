@@ -50,11 +50,8 @@ static const xbiosmode_t stmodes[]={
 #define ST_LOW_HEIGHT 200
 #define ST_REMAP_CHANGE_THRESHOLD 192
 
-enum {
-	ST_RENDER_GRAYSCALE = 0,
-	ST_RENDER_GRAYSCALE_DITHER,
-	ST_RENDER_COLOR_DITHER
-};
+static const char ST_RENDER_GRAYSCALE[] = "grayscale";
+static const char ST_RENDER_COLOR[] = "color";
 
 static const Uint8 bayer4x4[16]={
 	0,8,2,10,
@@ -72,7 +69,7 @@ static Uint8 st_palette_used[256];
 static Uint8 st_dither_map[16][256];
 static int st_force_full_refresh = 1;
 static int st_map_used_count = 0;
-static int st_render_mode = ST_RENDER_COLOR_DITHER;
+static const char *st_render_mode = ST_RENDER_COLOR;
 
 static void listModes(_THIS, int actually_add);
 static void saveMode(_THIS, SDL_PixelFormat *vformat);
@@ -86,7 +83,7 @@ static void swapVbuffers(_THIS);
 static int allocVbuffers(_THIS, const xbiosmode_t *new_video_mode, int num_buffers, int bufsize);
 static void freeVbuffers(_THIS);
 static int setColors(_THIS, int firstcolor, int ncolors, SDL_Color *colors);
-static void updateGrayPalette(_THIS, int dither);
+static void updateGrayPalette(_THIS);
 static void updateRenderMode(void);
 
 static __inline__ int colorDist(SDL_Color c1, SDL_Color c2)
@@ -125,17 +122,17 @@ static __inline__ Uint32 colorKey(SDL_Color color)
 static void updateRenderMode(void)
 {
 	const char *envr;
-	int mode;
 
-	st_render_mode = ST_RENDER_COLOR_DITHER;
+	st_render_mode = ST_RENDER_COLOR;
 	envr = SDL_getenv("SDL_XBIOS_ST_RENDER_MODE");
 	if (envr == NULL) {
 		return;
 	}
 
-	mode = SDL_atoi(envr);
-	if ((mode >= ST_RENDER_GRAYSCALE) && (mode <= ST_RENDER_COLOR_DITHER)) {
-		st_render_mode = mode;
+	if (SDL_strcasecmp(envr, ST_RENDER_GRAYSCALE) == 0) {
+		st_render_mode = ST_RENDER_GRAYSCALE;
+	} else if (SDL_strcasecmp(envr, ST_RENDER_COLOR) == 0) {
+		st_render_mode = ST_RENDER_COLOR;
 	}
 }
 
@@ -404,7 +401,7 @@ static void updatePalette(_THIS, int refine_palette)
 	st_palette_init = 1;
 }
 
-static void updateGrayPalette(_THIS, int dither)
+static void updateGrayPalette(_THIS)
 {
 	extern Uint8 SDL_Atari_C2pPalette4[256];
 	int i;
@@ -430,7 +427,7 @@ static void updateGrayPalette(_THIS, int dither)
 	st_map_used_count = 16;
 
 	for (i = 0; i < 256; ++i) {
-		int gray, base, next, frac, phase;
+		int gray, base, phase;
 
 		gray = colorGray(st_colors[i]);
 		base = gray >> 4;
@@ -439,17 +436,8 @@ static void updateGrayPalette(_THIS, int dither)
 		}
 		SDL_Atari_C2pPalette4[i] = base;
 
-		if (!dither) {
-			for (phase = 0; phase < 16; ++phase) {
-				st_dither_map[phase][i] = base;
-			}
-			continue;
-		}
-
-		next = (base < 15) ? (base + 1) : base;
-		frac = gray & 15;
 		for (phase = 0; phase < 16; ++phase) {
-			st_dither_map[phase][i] = (bayer4x4[phase] < frac) ? next : base;
+			st_dither_map[phase][i] = base;
 		}
 	}
 
@@ -505,12 +493,12 @@ int SDL_XBIOS_ST_ConsumeFullRefresh(_THIS)
 
 int SDL_XBIOS_ST_GetRenderMode(void)
 {
-	return st_render_mode;
+	return (st_render_mode == ST_RENDER_COLOR) ? 1 : 0;
 }
 
 void SDL_XBIOS_ST_SyncRenderMode(_THIS)
 {
-	int old_mode;
+	const char *old_mode;
 
 	old_mode = st_render_mode;
 	updateRenderMode();
@@ -518,8 +506,8 @@ void SDL_XBIOS_ST_SyncRenderMode(_THIS)
 		return;
 	}
 
-	if (st_render_mode != ST_RENDER_COLOR_DITHER) {
-		updateGrayPalette(this, st_render_mode == ST_RENDER_GRAYSCALE_DITHER);
+	if (st_render_mode != ST_RENDER_COLOR) {
+		updateGrayPalette(this);
 	} else {
 		updatePalette(this, 1);
 	}
@@ -540,7 +528,7 @@ void SDL_XBIOS_VideoInit_ST(_THIS, unsigned long cookie_cvdo)
 	}
 	st_colors_init = 1;
 
-	updateGrayPalette(this, st_render_mode != ST_RENDER_GRAYSCALE);
+	updateGrayPalette(this);
 	st_palette_init = 0;
 	st_force_full_refresh = 1;
 
@@ -717,8 +705,8 @@ static int setColors(_THIS, int firstcolor, int ncolors, SDL_Color *colors)
 		return(1);
 	}
 
-	if (st_render_mode != ST_RENDER_COLOR_DITHER) {
-		updateGrayPalette(this, st_render_mode == ST_RENDER_GRAYSCALE_DITHER);
+	if (st_render_mode != ST_RENDER_COLOR) {
+		updateGrayPalette(this);
 		st_force_full_refresh = 1;
 		return(1);
 	}

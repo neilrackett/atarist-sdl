@@ -96,9 +96,8 @@ SDL_VIDEO_ALIGNED_WINDOWS:
 SDL_XBIOS_ST_RENDER_MODE:
 	Selects ST low-res (320x200x4) XBIOS rendering mode:
 
-	Set to '0' for grayscale
-	Set to '1' for grayscale+dither
-	Set to '2' for color+dither (default)
+	Set to 'grayscale' for grayscale
+	Set to 'color' for color with Bayer dithering (default)
 
 SDL_AUDIODRIVER:
 	Set to 'mint_gsxb' to force Atari GSXB audio driver
@@ -177,8 +176,8 @@ Xbios video:
 	them.
 
 	ST, STE, Mega ST, Mega STE:
-		Emulates 320x200x8 using 320x200x4 bits with greyscale, greyscale
-		with dither or color with dither based on SDL_XBIOS_ST_RENDER_MODE.
+		Emulates 320x200x8 using 320x200x4 bits using either greyscale or 
+		16-colors Bayer dithering based on SDL_XBIOS_ST_RENDER_MODE.
 	TT:
 		320x480x8 and 320x240x8 (software double-lined mode).
 	Falcon:
