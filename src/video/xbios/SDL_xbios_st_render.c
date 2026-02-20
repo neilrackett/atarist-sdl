@@ -19,14 +19,17 @@
     Sam Lantinga
     slouken@libsdl.org
 */
+
+/*
+    ST render update/flip and dirty-rect conversion paths
+
+		Neil Rackett
+*/
+
 #include "SDL_config.h"
-
 #include <stdio.h>
-
 #include <mint/osbind.h>
-
 #include "../SDL_sysvideo.h"
-
 #include "../ataricommon/SDL_ataric2p_s.h"
 #include "SDL_xbios_st_int.h"
 

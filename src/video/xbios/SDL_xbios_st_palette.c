@@ -19,12 +19,16 @@
     Sam Lantinga
     slouken@libsdl.org
 */
+
+/*
+    ST palette management and 8bpp->4bpp mapping
+
+		Neil Rackett
+*/
+
 #include "SDL_config.h"
-
 #include <mint/osbind.h>
-
 #include "../ataricommon/SDL_ataric2p_s.h"
-
 #include "SDL_xbios_st_int.h"
 
 static __inline__ int colorDist(SDL_Color c1, SDL_Color c2)

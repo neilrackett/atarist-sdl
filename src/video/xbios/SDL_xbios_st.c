@@ -28,8 +28,8 @@
 */
 
 /*
-    Support for colour and bayer dithering in ST low-res
-
+    Support for colour and bayer dithering
+		
     Neil Rackett
 */
 
