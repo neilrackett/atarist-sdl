@@ -56,11 +56,6 @@ static __inline__ Uint8 colorGrayNibble(SDL_Color color)
 	return (Uint8)(colorGray(color) >> 4);
 }
 
-static __inline__ Uint32 colorKey(SDL_Color color)
-{
-	return ((Uint32)color.r << 16) | ((Uint32)color.g << 8) | (Uint32)color.b;
-}
-
 static void setHardwarePalette(_THIS)
 {
 	const Uint8 *src;
@@ -78,57 +73,6 @@ static void setHardwarePalette(_THIS)
 	Setpalette(TT_palette);
 }
 
-static int updatePaletteExact(_THIS)
-{
-	extern Uint8 SDL_Atari_C2pPalette4[256];
-	Uint32 exact_key[16];
-	Uint8 exact_source[16];
-	int exact_count;
-	int i, j;
-
-	exact_count = 0;
-	for (i = 0; i < 256; ++i) {
-		Uint32 key;
-
-		key = colorKey(st_colors[i]);
-		for (j = 0; j < exact_count; ++j) {
-			if (exact_key[j] == key) {
-				break;
-			}
-		}
-		if (j == exact_count) {
-			if (exact_count >= 16) {
-				return 0;
-			}
-			exact_source[exact_count++] = i;
-			exact_key[j] = key;
-		}
-		SDL_Atari_C2pPalette4[i] = j;
-	}
-
-	SDL_memset(st_palette_used, 0, sizeof(st_palette_used));
-	st_map_used_count = exact_count;
-	st_palette_source_count = exact_count;
-	for (i = 0; i < 16; ++i) {
-		int src;
-
-		src = (i < exact_count) ? exact_source[i] : exact_source[0];
-		st_palette_source[i] = src;
-		if (i < exact_count) {
-			st_palette_used[src] = 1;
-		}
-	}
-
-	SDL_memcpy(st_dither_map[0], SDL_Atari_C2pPalette4, sizeof(st_dither_map[0]));
-	for (i = 1; i < 16; ++i) {
-		SDL_memcpy(st_dither_map[i], st_dither_map[0], sizeof(st_dither_map[0]));
-	}
-
-	setHardwarePalette(this);
-	st_palette_init = 1;
-	return 1;
-}
-
 static void updatePalette(_THIS, int refine_palette)
 {
 	extern Uint8 SDL_Atari_C2pPalette4[256];
@@ -141,10 +85,6 @@ static void updatePalette(_THIS, int refine_palette)
 	int inverse_dist[16];
 	Uint8 inverse_found[16];
 	int i, k;
-
-	if (updatePaletteExact(this)) {
-		return;
-	}
 
 	palette[0] = st_colors[0];
 	for (i = 0; i < 256; ++i) {
