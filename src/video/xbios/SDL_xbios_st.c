@@ -33,6 +33,8 @@
     Neil Rackett
 */
 
+#include <stdio.h>
+
 #include <mint/cookie.h>
 #include <mint/osbind.h>
 
@@ -49,6 +51,23 @@ static const xbiosmode_t stmodes[]={
 #define ST_LOW_WIDTH 320
 #define ST_LOW_HEIGHT 200
 #define ST_REMAP_CHANGE_THRESHOLD 192
+#define XBIOS_ST_MAX_BATCHED_RECTS 64
+#define XBIOS_ST_TILE_SHIFT 4
+#define XBIOS_ST_TILE_WIDTH (1 << XBIOS_ST_TILE_SHIFT)
+#define XBIOS_ST_MAX_SPANS_PER_ROW (ST_LOW_WIDTH / XBIOS_ST_TILE_WIDTH)
+
+#ifndef XBIOS_ST_DEFAULT_FULL_REFRESH_PCT
+#define XBIOS_ST_DEFAULT_FULL_REFRESH_PCT 60
+#endif
+#ifndef XBIOS_ST_COPYBACK_SKIP_PCT
+#define XBIOS_ST_COPYBACK_SKIP_PCT 85
+#endif
+#ifndef XBIOS_ST_DEFAULT_SINGLEBUF_VSYNC
+#define XBIOS_ST_DEFAULT_SINGLEBUF_VSYNC 2
+#endif
+#ifndef XBIOS_ST_ADAPTIVE_VSYNC_PCT
+#define XBIOS_ST_ADAPTIVE_VSYNC_PCT 25
+#endif
 
 #ifndef SDL_XBIOS_ST_RENDER_MODE
 #define SDL_XBIOS_ST_RENDER_MODE "color"
@@ -71,9 +90,20 @@ static int st_palette_init = 0;
 static Uint8 st_palette_source[16];
 static Uint8 st_palette_used[256];
 static Uint8 st_dither_map[16][256];
+static SDL_bool st_shadow_warning_shown;
 static int st_force_full_refresh = 1;
 static int st_map_used_count = 0;
 static const char *st_render_mode = ST_RENDER_COLOR;
+static int ste_blitter_available = -1;
+static int xbios_st_full_refresh_threshold_pct = XBIOS_ST_DEFAULT_FULL_REFRESH_PCT;
+static int xbios_st_singlebuf_vsync_mode = XBIOS_ST_DEFAULT_SINGLEBUF_VSYNC;
+
+typedef struct {
+	int x1;
+	int x2;
+	int y;
+	int h;
+} xbiosstrect_t;
 
 static void listModes(_THIS, int actually_add);
 static void saveMode(_THIS, SDL_PixelFormat *vformat);
@@ -88,6 +118,8 @@ static int allocVbuffers(_THIS, const xbiosmode_t *new_video_mode, int num_buffe
 static void freeVbuffers(_THIS);
 static int setColors(_THIS, int firstcolor, int ncolors, SDL_Color *colors);
 static void updateGrayPalette(_THIS);
+static void updateRects_ST(_THIS, int numrects, SDL_Rect *rects);
+static int flipHWSurface_ST(_THIS, SDL_Surface *surface);
 
 static __inline__ int colorDist(SDL_Color c1, SDL_Color c2)
 {
@@ -426,7 +458,7 @@ static void updateGrayPalette(_THIS)
 	st_palette_init = 1;
 }
 
-void SDL_XBIOS_ST_DitherConvertRect(_THIS, const Uint8 *src, Uint8 *dst, int x, int y, int w, int h, int srcpitch, int dstpitch)
+static void ditherConvertRect(_THIS, const Uint8 *src, Uint8 *dst, int x, int y, int w, int h, int srcpitch, int dstpitch)
 {
 	const Uint8 *maps[16];
 	Uint32 phase;
@@ -464,7 +496,7 @@ void SDL_XBIOS_ST_DitherConvertRect(_THIS, const Uint8 *src, Uint8 *dst, int x, 
 	);
 }
 
-int SDL_XBIOS_ST_ConsumeFullRefresh(_THIS)
+static int consumeFullRefresh(_THIS)
 {
 	int refresh;
 
@@ -473,15 +505,616 @@ int SDL_XBIOS_ST_ConsumeFullRefresh(_THIS)
 	return refresh;
 }
 
-int SDL_XBIOS_ST_GetRenderMode(void)
+static int parseEnvInt(const char *name, int default_value, int min_value, int max_value)
 {
-	return (st_render_mode == ST_RENDER_COLOR) ? 1 : 0;
+	const char *envr;
+	int value;
+
+	envr = SDL_getenv(name);
+	if (!envr || !*envr) {
+		return default_value;
+	}
+
+	value = SDL_atoi(envr);
+	if (value < min_value) {
+		value = min_value;
+	} else if (value > max_value) {
+		value = max_value;
+	}
+
+	return value;
 }
 
-void SDL_XBIOS_ST_SyncRenderMode(_THIS)
+static void loadPerfHints(void)
 {
-	/* Render mode is now init-time only; no mid-flight env polling. */
-	(void)this;
+	xbios_st_full_refresh_threshold_pct = parseEnvInt(
+		"SDL_XBIOS_ST_FULL_REFRESH_PCT",
+		XBIOS_ST_DEFAULT_FULL_REFRESH_PCT,
+		0, 100
+	);
+	xbios_st_singlebuf_vsync_mode = parseEnvInt(
+		"SDL_XBIOS_ST_SINGLEBUF_VSYNC",
+		XBIOS_ST_DEFAULT_SINGLEBUF_VSYNC,
+		0, 2
+	);
+}
+
+static int shouldFullRefresh(int dirty_area, int total_area)
+{
+	return (dirty_area * 100) >= (total_area * xbios_st_full_refresh_threshold_pct);
+}
+
+static int shouldSingleBufVsync(int is_st_low4, int dirty_area, int total_area)
+{
+	if (!is_st_low4) {
+		return 1;
+	}
+
+	if (xbios_st_singlebuf_vsync_mode <= 0) {
+		return 0;
+	}
+	if (xbios_st_singlebuf_vsync_mode >= 2) {
+		return (dirty_area * 100) <= (total_area * XBIOS_ST_ADAPTIVE_VSYNC_PCT);
+	}
+
+	return 1;
+}
+
+static int hasBlitter(void)
+{
+	if (ste_blitter_available < 0) {
+		ste_blitter_available = (Blitmode(-1) & 1) ? 1 : 0;
+	}
+
+	return ste_blitter_available;
+}
+
+static void copyRect(Uint8 *src_base, Uint8 *dst_base, int srcpitch, int dstpitch, int x, int y, int w, int h)
+{
+	volatile Uint16 * const blt_src_xinc = (volatile Uint16 *) 0xFF8A20;
+	volatile Uint16 * const blt_src_yinc = (volatile Uint16 *) 0xFF8A22;
+	volatile Uint32 * const blt_src_addr = (volatile Uint32 *) 0xFF8A24;
+	volatile Uint16 * const blt_endmask1 = (volatile Uint16 *) 0xFF8A28;
+	volatile Uint16 * const blt_endmask2 = (volatile Uint16 *) 0xFF8A2A;
+	volatile Uint16 * const blt_endmask3 = (volatile Uint16 *) 0xFF8A2C;
+	volatile Uint16 * const blt_dst_xinc = (volatile Uint16 *) 0xFF8A2E;
+	volatile Uint16 * const blt_dst_yinc = (volatile Uint16 *) 0xFF8A30;
+	volatile Uint32 * const blt_dst_addr = (volatile Uint32 *) 0xFF8A32;
+	volatile Uint16 * const blt_xcount = (volatile Uint16 *) 0xFF8A36;
+	volatile Uint16 * const blt_ycount = (volatile Uint16 *) 0xFF8A38;
+	volatile Uint8 * const blt_hop = (volatile Uint8 *) 0xFF8A3A;
+	volatile Uint8 * const blt_op = (volatile Uint8 *) 0xFF8A3B;
+	volatile Uint8 * const blt_ctrl = (volatile Uint8 *) 0xFF8A3C;
+	volatile Uint8 * const blt_skew = (volatile Uint8 *) 0xFF8A3D;
+	Uint8 *src;
+	Uint8 *dst;
+	int bytes;
+	int words;
+	int row;
+
+	if ((x < 0) || (y < 0) || (w <= 0) || (h <= 0)) {
+		return;
+	}
+
+	bytes = w >> 1;
+	words = bytes >> 1;
+	if (words <= 0) {
+		return;
+	}
+
+	src = src_base + y * srcpitch + (x >> 1);
+	dst = dst_base + y * dstpitch + (x >> 1);
+
+	if ((((long) src | (long) dst | bytes | srcpitch | dstpitch) & 1) != 0 ||
+	    (srcpitch < bytes) || (dstpitch < bytes)) {
+		if ((srcpitch == bytes) && (dstpitch == bytes)) {
+			SDL_memcpy(dst, src, bytes * h);
+			return;
+		}
+
+		for (row = 0; row < h; ++row) {
+			SDL_memcpy(dst, src, bytes);
+			src += srcpitch;
+			dst += dstpitch;
+		}
+		return;
+	}
+
+	while ((*blt_ctrl) & 0x80) {
+	}
+
+	*blt_src_xinc = 2;
+	*blt_src_yinc = srcpitch - bytes;
+	*blt_src_addr = (Uint32) src;
+	*blt_endmask1 = 0xffff;
+	*blt_endmask2 = 0xffff;
+	*blt_endmask3 = 0xffff;
+	*blt_dst_xinc = 2;
+	*blt_dst_yinc = dstpitch - bytes;
+	*blt_dst_addr = (Uint32) dst;
+	*blt_xcount = words;
+	*blt_ycount = h;
+	*blt_hop = 2;
+	*blt_op = 3;
+	*blt_skew = 0;
+	*blt_ctrl = 0xc0;
+
+	while ((*blt_ctrl) & 0x80) {
+	}
+}
+
+static int alignRect(const SDL_Rect *rect, int max_w, int max_h, xbiosstrect_t *out)
+{
+	int x1, x2, y1, y2;
+
+	if ((rect->w <= 0) || (rect->h <= 0)) {
+		return 0;
+	}
+
+	x1 = rect->x;
+	y1 = rect->y;
+	x2 = rect->x + rect->w;
+	y2 = rect->y + rect->h;
+
+	if (x1 < 0) {
+		x1 = 0;
+	}
+	if (y1 < 0) {
+		y1 = 0;
+	}
+	if (x2 > max_w) {
+		x2 = max_w;
+	}
+	if (y2 > max_h) {
+		y2 = max_h;
+	}
+	if ((x2 <= x1) || (y2 <= y1)) {
+		return 0;
+	}
+
+	x1 &= ~(XBIOS_ST_TILE_WIDTH - 1);
+	if (x2 & (XBIOS_ST_TILE_WIDTH - 1)) {
+		x2 = (x2 + XBIOS_ST_TILE_WIDTH - 1) & ~(XBIOS_ST_TILE_WIDTH - 1);
+		if (x2 > max_w) {
+			x2 = max_w;
+		}
+	}
+
+	out->x1 = x1;
+	out->x2 = x2;
+	out->y = y1;
+	out->h = y2 - y1;
+	return 1;
+}
+
+static int coalesceRects(const SDL_Rect *rects, int numrects, xbiosstrect_t *merged, int max_merged, int max_w, int max_h, int *dirty_area)
+{
+	Uint32 dirty_rows[ST_LOW_HEIGHT];
+	int active_idx[XBIOS_ST_MAX_SPANS_PER_ROW];
+	int next_active_idx[XBIOS_ST_MAX_SPANS_PER_ROW];
+	int span_x1[XBIOS_ST_MAX_SPANS_PER_ROW];
+	int span_x2[XBIOS_ST_MAX_SPANS_PER_ROW];
+	int merged_count, active_count;
+	int cols, rows;
+	int i, y;
+
+	if (max_w > ST_LOW_WIDTH) {
+		max_w = ST_LOW_WIDTH;
+	}
+	if (max_h > ST_LOW_HEIGHT) {
+		max_h = ST_LOW_HEIGHT;
+	}
+	if ((max_w <= 0) || (max_h <= 0)) {
+		if (dirty_area) {
+			*dirty_area = 0;
+		}
+		return 0;
+	}
+
+	rows = max_h;
+	cols = (max_w + XBIOS_ST_TILE_WIDTH - 1) >> XBIOS_ST_TILE_SHIFT;
+	if (cols > XBIOS_ST_MAX_SPANS_PER_ROW) {
+		cols = XBIOS_ST_MAX_SPANS_PER_ROW;
+	}
+
+	SDL_memset(dirty_rows, 0, sizeof(dirty_rows));
+	for (i = 0; i < numrects; ++i) {
+		xbiosstrect_t rect;
+		Uint32 row_mask;
+		int xbin1, xbin2;
+		int yy;
+
+		if (!alignRect(&rects[i], max_w, max_h, &rect)) {
+			continue;
+		}
+
+		xbin1 = rect.x1 >> XBIOS_ST_TILE_SHIFT;
+		xbin2 = (rect.x2 - 1) >> XBIOS_ST_TILE_SHIFT;
+		row_mask = 0;
+		for (yy = xbin1; yy <= xbin2; ++yy) {
+			row_mask |= ((Uint32)1 << yy);
+		}
+
+		for (yy = rect.y; yy < rect.y + rect.h; ++yy) {
+			dirty_rows[yy] |= row_mask;
+		}
+	}
+
+	merged_count = 0;
+	active_count = 0;
+	for (y = 0; y < rows; ++y) {
+		Uint32 mask;
+		int span_count;
+		int next_active_count;
+		int span;
+
+		mask = dirty_rows[y];
+		span_count = 0;
+		while (mask) {
+			int xbin1, xbin2;
+			int xx;
+			int x1, x2;
+
+			for (xbin1 = 0; xbin1 < cols; ++xbin1) {
+				if (mask & ((Uint32)1 << xbin1)) {
+					break;
+				}
+			}
+			if (xbin1 >= cols) {
+				break;
+			}
+
+			xbin2 = xbin1;
+			while ((xbin2 + 1 < cols) && (mask & ((Uint32)1 << (xbin2 + 1)))) {
+				++xbin2;
+			}
+
+			x1 = xbin1 << XBIOS_ST_TILE_SHIFT;
+			x2 = (xbin2 + 1) << XBIOS_ST_TILE_SHIFT;
+			if (x2 > max_w) {
+				x2 = max_w;
+			}
+
+			if (span_count >= XBIOS_ST_MAX_SPANS_PER_ROW) {
+				return -1;
+			}
+			span_x1[span_count] = x1;
+			span_x2[span_count] = x2;
+			++span_count;
+
+			for (xx = xbin1; xx <= xbin2; ++xx) {
+				mask &= ~((Uint32)1 << xx);
+			}
+		}
+
+		next_active_count = 0;
+		for (span = 0; span < span_count; ++span) {
+			int found_idx;
+			int a;
+
+			found_idx = -1;
+			for (a = 0; a < active_count; ++a) {
+				int idx;
+
+				idx = active_idx[a];
+				if ((merged[idx].x1 == span_x1[span]) &&
+				    (merged[idx].x2 == span_x2[span]) &&
+				    (merged[idx].y + merged[idx].h == y)) {
+					found_idx = idx;
+					break;
+				}
+			}
+
+			if (found_idx >= 0) {
+				merged[found_idx].h++;
+				next_active_idx[next_active_count++] = found_idx;
+			} else {
+				if (merged_count >= max_merged) {
+					return -1;
+				}
+
+				merged[merged_count].x1 = span_x1[span];
+				merged[merged_count].x2 = span_x2[span];
+				merged[merged_count].y = y;
+				merged[merged_count].h = 1;
+				next_active_idx[next_active_count++] = merged_count;
+				merged_count++;
+			}
+		}
+
+		active_count = next_active_count;
+		for (i = 0; i < active_count; ++i) {
+			active_idx[i] = next_active_idx[i];
+		}
+	}
+
+	if (dirty_area) {
+		int area;
+
+		area = 0;
+		for (i = 0; i < merged_count; ++i) {
+			area += (merged[i].x2 - merged[i].x1) * merged[i].h;
+		}
+		*dirty_area = area;
+	}
+
+	return merged_count;
+}
+
+static void updateRects_ST(_THIS, int numrects, SDL_Rect *rects)
+{
+	SDL_Surface *surface = this->screen;
+	Uint8 *c2p_source;
+	int src_offset;
+	int i;
+	int x1, x2, y, h;
+	int did_full_refresh;
+	int doubleline;
+	int is_st_low4;
+	int use_st_dither;
+	int merged_count;
+	int force_full_refresh;
+	int dirty_area;
+	int total_area;
+	xbiosstrect_t merged_rects[XBIOS_ST_MAX_BATCHED_RECTS];
+
+	if (this->shadow && !st_shadow_warning_shown) {
+		fprintf(stderr, "Warning: shadow buffer in use due to SDL_SetVideoMode(SDL_SWSURFACE)\n");
+		st_shadow_warning_shown = SDL_TRUE;
+	}
+
+	src_offset = (surface->locked ? -surface->offset : 0);
+	did_full_refresh = 0;
+	doubleline = 0;
+	is_st_low4 = 0;
+	use_st_dither = 0;
+	merged_count = 0;
+	force_full_refresh = 0;
+	dirty_area = 0;
+	total_area = surface->w * surface->h;
+
+	if (XBIOS_current->flags & XBIOSMODE_C2P) {
+		doubleline = (XBIOS_current->flags & XBIOSMODE_DOUBLELINE ? 1 : 0);
+		is_st_low4 = (XBIOS_current->depth == 4) && (XBIOS_current->number == (ST_LOW >> 8));
+		use_st_dither = is_st_low4 && (st_render_mode == ST_RENDER_COLOR);
+		c2p_source = surface->pixels + src_offset;
+
+		if (is_st_low4 && (numrects > 0)) {
+			merged_count = coalesceRects(
+				rects, numrects,
+				merged_rects, XBIOS_ST_MAX_BATCHED_RECTS,
+				surface->w, surface->h,
+				&dirty_area
+			);
+			if (merged_count >= 0) {
+				numrects = merged_count;
+			} else {
+				merged_count = 0;
+				if (use_st_dither) {
+					numrects = 0;
+					dirty_area = total_area;
+					force_full_refresh = 1;
+				}
+			}
+		}
+
+		if (!is_st_low4 && (numrects > 0)) {
+			for (i = 0; i < numrects; ++i) {
+				int rw;
+				int rh;
+
+				rw = rects[i].w;
+				rh = rects[i].h;
+				if ((rw > 0) && (rh > 0)) {
+					dirty_area += rw * rh;
+				}
+			}
+			if (dirty_area > total_area) {
+				dirty_area = total_area;
+			}
+		}
+
+		if (use_st_dither) {
+			force_full_refresh |= consumeFullRefresh(this);
+			if (!force_full_refresh && (dirty_area > 0) && shouldFullRefresh(dirty_area, total_area)) {
+				force_full_refresh = 1;
+			}
+		}
+
+#ifndef DEBUG_VIDEO_XBIOS
+		if ((surface->flags & SDL_DOUBLEBUF) != SDL_DOUBLEBUF) {
+			if (shouldSingleBufVsync(is_st_low4, dirty_area, total_area)) {
+				(*XBIOS_vsync)(this);
+			}
+		}
+#endif
+
+		if (use_st_dither && force_full_refresh) {
+			ditherConvertRect(
+				this,
+				surface->pixels + src_offset,
+				XBIOS_screens[XBIOS_fbnum],
+				0, 0,
+				surface->w, surface->h,
+				surface->pitch,
+				XBIOS_pitch << doubleline
+			);
+			did_full_refresh = 1;
+			dirty_area = total_area;
+			numrects = 0;
+		}
+
+		for (i=0;i<numrects;i++) {
+			if (merged_count > 0) {
+				x1 = merged_rects[i].x1;
+				x2 = merged_rects[i].x2;
+				y = merged_rects[i].y;
+				h = merged_rects[i].h;
+			} else {
+				x1 = rects[i].x & ~15;
+				x2 = rects[i].x + rects[i].w;
+				if (x2 & 15) {
+					x2 = (x2 | 15) +1;
+				}
+				y = rects[i].y;
+				h = rects[i].h;
+			}
+
+			if (use_st_dither) {
+				ditherConvertRect(
+					this,
+					surface->pixels + src_offset,
+					XBIOS_screens[XBIOS_fbnum],
+					x1, y,
+					x2-x1, h,
+					surface->pitch,
+					XBIOS_pitch << doubleline
+				);
+			} else {
+				SDL_Atari_C2pConvert(
+					c2p_source, XBIOS_screens[XBIOS_fbnum],
+					x1, y,
+					x2-x1, h,
+					doubleline, XBIOS_current->depth,
+					surface->pitch, XBIOS_pitch
+				);
+			}
+		}
+	}
+
+	if ((surface->flags & SDL_DOUBLEBUF) == SDL_DOUBLEBUF) {
+		int copy_back;
+
+#ifndef DEBUG_VIDEO_XBIOS
+		(*XBIOS_vsync)(this);
+		(*XBIOS_swapVbuffers)(this);
+#endif
+
+		XBIOS_fbnum ^= 1;
+		copy_back = !did_full_refresh && (numrects > 0);
+		if (copy_back && (dirty_area > 0) &&
+		    (dirty_area * 100 >= total_area * XBIOS_ST_COPYBACK_SKIP_PCT)) {
+			copy_back = 0;
+		}
+
+		if (copy_back && use_st_dither && hasBlitter()) {
+			for (i = 0; i < numrects; ++i) {
+				if (merged_count > 0) {
+					x1 = merged_rects[i].x1;
+					x2 = merged_rects[i].x2;
+					y = merged_rects[i].y;
+					h = merged_rects[i].h;
+				} else {
+					x1 = rects[i].x & ~15;
+					x2 = rects[i].x + rects[i].w;
+					if (x2 & 15) {
+						x2 = (x2 | 15) +1;
+					}
+					y = rects[i].y;
+					h = rects[i].h;
+				}
+
+				copyRect(
+					XBIOS_screens[XBIOS_fbnum ^ 1],
+					XBIOS_screens[XBIOS_fbnum],
+					XBIOS_pitch << doubleline,
+					XBIOS_pitch << doubleline,
+					x1, y,
+					x2 - x1, h
+				);
+			}
+		}
+		if (!XBIOS_shadowscreen) {
+			src_offset = (surface->locked ? surface->offset : 0);
+			surface->pixels=((Uint8 *) XBIOS_screens[XBIOS_fbnum]) + src_offset;
+		}
+	}
+}
+
+static int flipHWSurface_ST(_THIS, SDL_Surface *surface)
+{
+	int src_offset;
+	int dst_offset;
+	Uint8 *c2p_source;
+	int doubleline;
+	int use_st_dither;
+	int copy_x, copy_y, copy_w, copy_h;
+	int is_full_redraw;
+
+	src_offset = (surface->locked ? 0 : surface->offset);
+	doubleline = 0;
+	use_st_dither = 0;
+	copy_x = 0;
+	copy_y = 0;
+	copy_w = surface->w;
+	copy_h = surface->h;
+	is_full_redraw = 0;
+
+	if (this->shadow && !st_shadow_warning_shown) {
+		fprintf(stderr, "Warning: shadow buffer in use due to SDL_SetVideoMode(SDL_SWSURFACE)\n");
+		st_shadow_warning_shown = SDL_TRUE;
+	}
+
+	if (XBIOS_current->flags & XBIOSMODE_C2P) {
+		doubleline = (XBIOS_current->flags & XBIOSMODE_DOUBLELINE ? 1 : 0);
+		use_st_dither = (XBIOS_current->depth == 4) && (XBIOS_current->number == (ST_LOW >> 8)) &&
+				(st_render_mode == ST_RENDER_COLOR);
+
+		dst_offset = this->offset_y * (XBIOS_pitch << doubleline) +
+				(this->offset_x & ~15) * XBIOS_current->depth / 8;
+		c2p_source = surface->pixels + src_offset;
+		copy_x = this->offset_x & ~15;
+		copy_y = this->offset_y;
+		copy_w = surface->w;
+		if (copy_w & 15) {
+			copy_w = (copy_w | 15) + 1;
+		}
+		copy_h = surface->h;
+		is_full_redraw = (copy_x <= 0) && (copy_y <= 0) &&
+				 (copy_w >= surface->w) && (copy_h >= surface->h);
+		if (use_st_dither) {
+			ditherConvertRect(
+				this, surface->pixels + src_offset,
+				((Uint8 *)XBIOS_screens[XBIOS_fbnum]) + dst_offset,
+				0, 0,
+				surface->w, surface->h,
+				surface->pitch,
+				XBIOS_pitch << doubleline
+			);
+		} else {
+			SDL_Atari_C2pConvert(
+				c2p_source, ((Uint8 *)XBIOS_screens[XBIOS_fbnum]) + dst_offset,
+				0, 0,
+				surface->w, surface->h,
+				doubleline, XBIOS_current->depth,
+				surface->pitch, XBIOS_pitch
+			);
+		}
+	}
+
+	if ((surface->flags & SDL_DOUBLEBUF) == SDL_DOUBLEBUF) {
+#ifndef DEBUG_VIDEO_XBIOS
+		(*XBIOS_vsync)(this);
+		(*XBIOS_swapVbuffers)(this);
+#endif
+
+		XBIOS_fbnum ^= 1;
+		if (use_st_dither && !is_full_redraw && hasBlitter()) {
+			copyRect(
+				XBIOS_screens[XBIOS_fbnum ^ 1],
+				XBIOS_screens[XBIOS_fbnum],
+				XBIOS_pitch << doubleline,
+				XBIOS_pitch << doubleline,
+				copy_x, copy_y, copy_w, copy_h
+			);
+		}
+		if (!XBIOS_shadowscreen) {
+			src_offset = (surface->locked ? surface->offset : 0);
+			surface->pixels=((Uint8 *) XBIOS_screens[XBIOS_fbnum]) + src_offset;
+		}
+	}
+
+	return(0);
 }
 
 void SDL_XBIOS_VideoInit_ST(_THIS, unsigned long cookie_cvdo)
@@ -510,6 +1143,8 @@ void SDL_XBIOS_VideoInit_ST(_THIS, unsigned long cookie_cvdo)
 	updateGrayPalette(this);
 	st_palette_init = 0;
 	st_force_full_refresh = 1;
+	st_shadow_warning_shown = SDL_FALSE;
+	ste_blitter_available = -1;
 
 	XBIOS_listModes = listModes;
 	XBIOS_saveMode = saveMode;
@@ -526,6 +1161,11 @@ void SDL_XBIOS_VideoInit_ST(_THIS, unsigned long cookie_cvdo)
 
 	if ((cookie_cvdo>>16) == VDO_STE) {
 		XBIOS_setMode = setMode_STE;
+	}
+	if ((cookie_cvdo>>16) == VDO_ST || (cookie_cvdo>>16) == VDO_STE) {
+		XBIOS_updRects = updateRects_ST;
+		this->FlipHWSurface = flipHWSurface_ST;
+		loadPerfHints();
 	}
 }
 
