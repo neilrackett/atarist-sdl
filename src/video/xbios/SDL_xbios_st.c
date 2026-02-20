@@ -927,6 +927,7 @@ static void updateRects_ST(_THIS, int numrects, SDL_Rect *rects)
 	int doubleline;
 	int is_st_low4;
 	int use_st_dither;
+	int use_st_blitter_copyback;
 	int merged_count;
 	int force_full_refresh;
 	int dirty_area;
@@ -940,6 +941,7 @@ static void updateRects_ST(_THIS, int numrects, SDL_Rect *rects)
 	doubleline = 0;
 	is_st_low4 = 0;
 	use_st_dither = 0;
+	use_st_blitter_copyback = 0;
 	merged_count = 0;
 	force_full_refresh = 0;
 	dirty_area = 0;
@@ -949,6 +951,7 @@ static void updateRects_ST(_THIS, int numrects, SDL_Rect *rects)
 		doubleline = (XBIOS_current->flags & XBIOSMODE_DOUBLELINE ? 1 : 0);
 		is_st_low4 = isStLow4Mode(this);
 		use_st_dither = is_st_low4 && isColorRenderMode();
+		use_st_blitter_copyback = is_st_low4;
 		c2p_source = surface->pixels + src_offset;
 
 		if (is_st_low4 && (numrects > 0)) {
@@ -1051,7 +1054,7 @@ static void updateRects_ST(_THIS, int numrects, SDL_Rect *rects)
 			copy_back = 0;
 		}
 
-		if (copy_back && use_st_dither && hasBlitter()) {
+		if (copy_back && use_st_blitter_copyback && hasBlitter()) {
 			for (i = 0; i < numrects; ++i) {
 				getUpdateRect(rects, merged_rects, merged_count, i, &x1, &x2, &y, &h);
 
@@ -1075,12 +1078,14 @@ static int flipHWSurface_ST(_THIS, SDL_Surface *surface)
 	int dst_offset;
 	Uint8 *c2p_source;
 	int doubleline;
+	int is_st_low4;
 	int use_st_dither;
 	int copy_x, copy_y, copy_w, copy_h;
 	int is_full_redraw;
 
 	src_offset = (surface->locked ? 0 : surface->offset);
 	doubleline = 0;
+	is_st_low4 = 0;
 	use_st_dither = 0;
 	copy_x = 0;
 	copy_y = 0;
@@ -1092,7 +1097,8 @@ static int flipHWSurface_ST(_THIS, SDL_Surface *surface)
 
 	if (XBIOS_current->flags & XBIOSMODE_C2P) {
 		doubleline = (XBIOS_current->flags & XBIOSMODE_DOUBLELINE ? 1 : 0);
-		use_st_dither = isStLow4Mode(this) && isColorRenderMode();
+		is_st_low4 = isStLow4Mode(this);
+		use_st_dither = is_st_low4 && isColorRenderMode();
 
 		dst_offset = this->offset_y * (XBIOS_pitch << doubleline) +
 				(this->offset_x & ~15) * XBIOS_current->depth / 8;
@@ -1128,7 +1134,7 @@ static int flipHWSurface_ST(_THIS, SDL_Surface *surface)
 
 	if ((surface->flags & SDL_DOUBLEBUF) == SDL_DOUBLEBUF) {
 		swapBuffers(this);
-		if (use_st_dither && !is_full_redraw && hasBlitter()) {
+		if (is_st_low4 && !is_full_redraw && hasBlitter()) {
 			copyRect(
 				XBIOS_screens[XBIOS_fbnum ^ 1],
 				XBIOS_screens[XBIOS_fbnum],
@@ -1160,7 +1166,9 @@ void SDL_XBIOS_VideoInit_ST(_THIS, unsigned long cookie_cvdo)
 	initColorTable();
 
 	updateGrayPalette(this);
-	st_palette_init = 0;
+	if (isColorRenderMode()) {
+		st_palette_init = 0;
+	}
 	st_force_full_refresh = 1;
 	st_shadow_warning_shown = SDL_FALSE;
 	ste_blitter_available = -1;
@@ -1342,8 +1350,18 @@ static int setColors(_THIS, int firstcolor, int ncolors, SDL_Color *colors)
 	}
 
 	if (!isColorRenderMode()) {
-		updateGrayPalette(this);
-		st_force_full_refresh = 1;
+		extern Uint8 SDL_Atari_C2pPalette4[256];
+
+		for (i = 0; i < ncolors; ++i) {
+			int gray, base;
+
+			gray = colorGray(st_colors[firstcolor+i]);
+			base = gray >> 4;
+			if (base > 15) {
+				base = 15;
+			}
+			SDL_Atari_C2pPalette4[firstcolor+i] = base;
+		}
 		return(1);
 	}
 
