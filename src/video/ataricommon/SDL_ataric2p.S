@@ -740,60 +740,60 @@ SYM(SDL_Atari_C2pConvert4):
 	move.l	#0x55555555,d6
 
 	move.b	(a0)+,d3
-	move.b	(a3,d3.l),d0
+	move.b	(a3,d3.w),d0
 	lsl.b	#4,d0
 	move.b	(a4)+,d3
-	or.b	(a3,d3.l),d0
+	or.b	(a3,d3.w),d0
 	lsl.l	#8,d0
 
 	move.b	(a0)+,d3
-	move.b	(a3,d3.l),d0
+	move.b	(a3,d3.w),d0
 	lsl.b	#4,d0
 	move.b	(a4)+,d3
-	or.b	(a3,d3.l),d0
+	or.b	(a3,d3.w),d0
 	lsl.l	#8,d0
 
 	move.b	(a0)+,d3
-	move.b	(a3,d3.l),d0
+	move.b	(a3,d3.w),d0
 	lsl.b	#4,d0
 	move.b	(a4)+,d3
-	or.b	(a3,d3.l),d0
+	or.b	(a3,d3.w),d0
 	lsl.l	#8,d0
 
 	move.b	(a0)+,d3
-	move.b	(a3,d3.l),d0
+	move.b	(a3,d3.w),d0
 	lsl.b	#4,d0
 	move.b	(a4)+,d3
-	or.b	(a3,d3.l),d0
+	or.b	(a3,d3.w),d0
 	addq.l	#4,a0
 	addq.l	#4,a4
 
 	move.b	(a0)+,d3
-	move.b	(a3,d3.l),d1
+	move.b	(a3,d3.w),d1
 	lsl.b	#4,d1
 	move.b	(a4)+,d3
-	or.b	(a3,d3.l),d1
+	or.b	(a3,d3.w),d1
 	lsl.l	#8,d1
 
 	move.b	(a0)+,d3
-	move.b	(a3,d3.l),d1
+	move.b	(a3,d3.w),d1
 	lsl.b	#4,d1
 	move.b	(a4)+,d3
-	or.b	(a3,d3.l),d1
+	or.b	(a3,d3.w),d1
 	lsl.l	#8,d1
 
 	move.b	(a0)+,d3
-	move.b	(a3,d3.l),d1
+	move.b	(a3,d3.w),d1
 	lsl.b	#4,d1
 	move.b	(a4)+,d3
-	or.b	(a3,d3.l),d1
+	or.b	(a3,d3.w),d1
 	lsl.l	#8,d1
 
 	move.b	(a0)+,d3
-	move.b	(a3,d3.l),d1
+	move.b	(a3,d3.w),d1
 	lsl.b	#4,d1
 	move.b	(a4)+,d3
-	or.b	(a3,d3.l),d1
+	or.b	(a3,d3.w),d1
 	addq.l	#4,a0
 	addq.l	#4,a4
 
@@ -801,62 +801,62 @@ SYM(SDL_Atari_C2pConvert4):
 
 c2p1x1_4_pix16:
 	move.b	(a0)+,d3
-	move.b	(a3,d3.l),d0
+	move.b	(a3,d3.w),d0
 	lsl.b	#4,d0
 	move.b	(a4)+,d3
-	or.b	(a3,d3.l),d0
+	or.b	(a3,d3.w),d0
 	lsl.l	#8,d0
 
 	move.b	(a0)+,d3
-	move.b	(a3,d3.l),d0
+	move.b	(a3,d3.w),d0
 	lsl.b	#4,d0
 	move.b	(a4)+,d3
-	or.b	(a3,d3.l),d0
+	or.b	(a3,d3.w),d0
 	lsl.l	#8,d0
 
 	move.b	(a0)+,d3
-	move.b	(a3,d3.l),d0
+	move.b	(a3,d3.w),d0
 	lsl.b	#4,d0
 	move.b	(a4)+,d3
-	or.b	(a3,d3.l),d0
+	or.b	(a3,d3.w),d0
 	lsl.l	#8,d0
 
 	move.b	(a0)+,d3
-	move.b	(a3,d3.l),d0
+	move.b	(a3,d3.w),d0
 	lsl.b	#4,d0
 	move.b	(a4)+,d3
-	or.b	(a3,d3.l),d0
+	or.b	(a3,d3.w),d0
 
 	move.l	a5,(a1)+
 	addq.l	#4,a0
 	addq.l	#4,a4
 
 	move.b	(a0)+,d3
-	move.b	(a3,d3.l),d1
+	move.b	(a3,d3.w),d1
 	lsl.b	#4,d1
 	move.b	(a4)+,d3
-	or.b	(a3,d3.l),d1
+	or.b	(a3,d3.w),d1
 	lsl.l	#8,d1
 
 	move.b	(a0)+,d3
-	move.b	(a3,d3.l),d1
+	move.b	(a3,d3.w),d1
 	lsl.b	#4,d1
 	move.b	(a4)+,d3
-	or.b	(a3,d3.l),d1
+	or.b	(a3,d3.w),d1
 	lsl.l	#8,d1
 
 	move.b	(a0)+,d3
-	move.b	(a3,d3.l),d1
+	move.b	(a3,d3.w),d1
 	lsl.b	#4,d1
 	move.b	(a4)+,d3
-	or.b	(a3,d3.l),d1
+	or.b	(a3,d3.w),d1
 	lsl.l	#8,d1
 
 	move.b	(a0)+,d3
-	move.b	(a3,d3.l),d1
+	move.b	(a3,d3.w),d1
 	lsl.b	#4,d1
 	move.b	(a4)+,d3
-	or.b	(a3,d3.l),d1
+	or.b	(a3,d3.w),d1
 
 	move.l	a6,(a1)+
 	addq.l	#4,a0
@@ -961,60 +961,60 @@ c2p1x1_4_dither_pix16:
 	addq.l	#4,a6
 
 	move.b	(a0)+,d3
-	move.b	(a2,d3.l),d1
+	move.b	(a2,d3.w),d1
 	lsl.b	#4,d1
 	move.b	(a6)+,d3
-	or.b	(a2,d3.l),d1
+	or.b	(a2,d3.w),d1
 	lsl.l	#8,d1
 
 	move.b	(a0)+,d3
-	move.b	(a3,d3.l),d1
+	move.b	(a3,d3.w),d1
 	lsl.b	#4,d1
 	move.b	(a6)+,d3
-	or.b	(a3,d3.l),d1
+	or.b	(a3,d3.w),d1
 	lsl.l	#8,d1
 
 	move.b	(a0)+,d3
-	move.b	(a4,d3.l),d1
+	move.b	(a4,d3.w),d1
 	lsl.b	#4,d1
 	move.b	(a6)+,d3
-	or.b	(a4,d3.l),d1
+	or.b	(a4,d3.w),d1
 	lsl.l	#8,d1
 
 	move.b	(a0)+,d3
-	move.b	(a5,d3.l),d1
+	move.b	(a5,d3.w),d1
 	lsl.b	#4,d1
 	move.b	(a6)+,d3
-	or.b	(a5,d3.l),d1
+	or.b	(a5,d3.w),d1
 	addq.l	#4,a0
 	addq.l	#4,a6
 
 	move.b	(a0)+,d3
-	move.b	(a2,d3.l),d2
+	move.b	(a2,d3.w),d2
 	lsl.b	#4,d2
 	move.b	(a6)+,d3
-	or.b	(a2,d3.l),d2
+	or.b	(a2,d3.w),d2
 	lsl.l	#8,d2
 
 	move.b	(a0)+,d3
-	move.b	(a3,d3.l),d2
+	move.b	(a3,d3.w),d2
 	lsl.b	#4,d2
 	move.b	(a6)+,d3
-	or.b	(a3,d3.l),d2
+	or.b	(a3,d3.w),d2
 	lsl.l	#8,d2
 
 	move.b	(a0)+,d3
-	move.b	(a4,d3.l),d2
+	move.b	(a4,d3.w),d2
 	lsl.b	#4,d2
 	move.b	(a6)+,d3
-	or.b	(a4,d3.l),d2
+	or.b	(a4,d3.w),d2
 	lsl.l	#8,d2
 
 	move.b	(a0)+,d3
-	move.b	(a5,d3.l),d2
+	move.b	(a5,d3.w),d2
 	lsl.b	#4,d2
 	move.b	(a6)+,d3
-	or.b	(a5,d3.l),d2
+	or.b	(a5,d3.w),d2
 	addq.l	#4,a0
 
 	| a3a2a1a0e3e2e1e0 b3b2b1b0f3f2f1f0 c3c2c1c0g3g2g1g0 d3d2d1d0h3h2h1h0
@@ -1113,7 +1113,7 @@ SYM(SDL_Atari_C2pConvert4_dither_rect):
 c2p1x1_4_dither_rect_line:
 	move.l	d4,d5
 	lsl.l	#4,d5
-	lea	(a2,d5.l),a3				| 4 map pointers for this line phase
+	lea	(a2,d5.w),a3				| 4 map pointers for this line phase
 
 #ifdef __FASTCALL__
 	move.l	a4,a0
@@ -1196,61 +1196,61 @@ SYM(SDL_Atari_C2pConvert4_rect):
 	lea	(a0,4),a5
 
 	move.b	(a0)+,d3
-	move.b	(a4,d3.l),d0
+	move.b	(a4,d3.w),d0
 	lsl.b	#4,d0
 	move.b	(a5)+,d3
-	or.b	(a4,d3.l),d0
+	or.b	(a4,d3.w),d0
 	lsl.l	#8,d0
 
 	move.b	(a0)+,d3
-	move.b	(a4,d3.l),d0
+	move.b	(a4,d3.w),d0
 	lsl.b	#4,d0
 	move.b	(a5)+,d3
-	or.b	(a4,d3.l),d0
+	or.b	(a4,d3.w),d0
 	lsl.l	#8,d0
 
 	move.b	(a0)+,d3
-	move.b	(a4,d3.l),d0
+	move.b	(a4,d3.w),d0
 	lsl.b	#4,d0
 	move.b	(a5)+,d3
-	or.b	(a4,d3.l),d0
+	or.b	(a4,d3.w),d0
 	lsl.l	#8,d0
 
 	move.b	(a0)+,d3
-	move.b	(a4,d3.l),d0
+	move.b	(a4,d3.w),d0
 	lsl.b	#4,d0
 	move.b	(a5)+,d3
-	or.b	(a4,d3.l),d0
+	or.b	(a4,d3.w),d0
 
 	addq.l	#4,a0
 	addq.l	#4,a5
 
 	move.b	(a0)+,d3
-	move.b	(a4,d3.l),d1
+	move.b	(a4,d3.w),d1
 	lsl.b	#4,d1
 	move.b	(a5)+,d3
-	or.b	(a4,d3.l),d1
+	or.b	(a4,d3.w),d1
 	lsl.l	#8,d1
 
 	move.b	(a0)+,d3
-	move.b	(a4,d3.l),d1
+	move.b	(a4,d3.w),d1
 	lsl.b	#4,d1
 	move.b	(a5)+,d3
-	or.b	(a4,d3.l),d1
+	or.b	(a4,d3.w),d1
 	lsl.l	#8,d1
 
 	move.b	(a0)+,d3
-	move.b	(a4,d3.l),d1
+	move.b	(a4,d3.w),d1
 	lsl.b	#4,d1
 	move.b	(a5)+,d3
-	or.b	(a4,d3.l),d1
+	or.b	(a4,d3.w),d1
 	lsl.l	#8,d1
 
 	move.b	(a0)+,d3
-	move.b	(a4,d3.l),d1
+	move.b	(a4,d3.w),d1
 	lsl.b	#4,d1
 	move.b	(a5)+,d3
-	or.b	(a4,d3.l),d1
+	or.b	(a4,d3.w),d1
 
 	addq.l	#4,a0
 
@@ -1262,62 +1262,62 @@ c2p1x1_4_rect_pix16:
 	lea	(a0,4),a5
 
 	move.b	(a0)+,d3
-	move.b	(a4,d3.l),d0
+	move.b	(a4,d3.w),d0
 	lsl.b	#4,d0
 	move.b	(a5)+,d3
-	or.b	(a4,d3.l),d0
+	or.b	(a4,d3.w),d0
 	lsl.l	#8,d0
 
 	move.b	(a0)+,d3
-	move.b	(a4,d3.l),d0
+	move.b	(a4,d3.w),d0
 	lsl.b	#4,d0
 	move.b	(a5)+,d3
-	or.b	(a4,d3.l),d0
+	or.b	(a4,d3.w),d0
 	lsl.l	#8,d0
 
 	move.b	(a0)+,d3
-	move.b	(a4,d3.l),d0
+	move.b	(a4,d3.w),d0
 	lsl.b	#4,d0
 	move.b	(a5)+,d3
-	or.b	(a4,d3.l),d0
+	or.b	(a4,d3.w),d0
 	lsl.l	#8,d0
 
 	move.b	(a0)+,d3
-	move.b	(a4,d3.l),d0
+	move.b	(a4,d3.w),d0
 	lsl.b	#4,d0
 	move.b	(a5)+,d3
-	or.b	(a4,d3.l),d0
+	or.b	(a4,d3.w),d0
 
 	move.l	a6,(a1)+
 	addq.l	#4,a0
 	addq.l	#4,a5
 
 	move.b	(a0)+,d3
-	move.b	(a4,d3.l),d1
+	move.b	(a4,d3.w),d1
 	lsl.b	#4,d1
 	move.b	(a5)+,d3
-	or.b	(a4,d3.l),d1
+	or.b	(a4,d3.w),d1
 	lsl.l	#8,d1
 
 	move.b	(a0)+,d3
-	move.b	(a4,d3.l),d1
+	move.b	(a4,d3.w),d1
 	lsl.b	#4,d1
 	move.b	(a5)+,d3
-	or.b	(a4,d3.l),d1
+	or.b	(a4,d3.w),d1
 	lsl.l	#8,d1
 
 	move.b	(a0)+,d3
-	move.b	(a4,d3.l),d1
+	move.b	(a4,d3.w),d1
 	lsl.b	#4,d1
 	move.b	(a5)+,d3
-	or.b	(a4,d3.l),d1
+	or.b	(a4,d3.w),d1
 	lsl.l	#8,d1
 
 	move.b	(a0)+,d3
-	move.b	(a4,d3.l),d1
+	move.b	(a4,d3.w),d1
 	lsl.b	#4,d1
 	move.b	(a5)+,d3
-	or.b	(a4,d3.l),d1
+	or.b	(a4,d3.w),d1
 
 	addq.l	#4,a0
 
