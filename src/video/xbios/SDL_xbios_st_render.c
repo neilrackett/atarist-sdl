@@ -46,31 +46,24 @@ static int isStLow4Mode(_THIS)
 	return (XBIOS_current->depth == 4) && (XBIOS_current->number == (ST_LOW >> 8));
 }
 
+/* Callers always pass a width that is already a multiple of 16. */
 static __inline__ void ditherConvertRect(const Uint8 *src, Uint8 *dst, int x, int y, int w, int h, int srcpitch, int dstpitch)
 {
-	Uint32 phase;
 	const Uint8 * const *maps;
 
-	if ((x < 0) || (y < 0) || (w <= 0) || (h <= 0)) {
-		return;
-	}
-	if ((x + w > ST_LOW_WIDTH) || (y + h > ST_LOW_HEIGHT)) {
-		return;
-	}
-	w &= ~15;
-	if (w <= 0) {
+	if ((x < 0) || (y < 0) || (w <= 0) || (h <= 0) ||
+	    (x + w > ST_LOW_WIDTH) || (y + h > ST_LOW_HEIGHT)) {
 		return;
 	}
 
 	maps = st_dither_phase_maps[x & 3];
 
-	phase = (Uint32)(y & 3);
 	SDL_Atari_C2pConvert4_dither_rect(
 		src + y * srcpitch + x,
 		dst + y * dstpitch + (x >> 1),
 		(Uint32)w, (Uint32)h,
 		(Uint32)srcpitch, (Uint32)dstpitch,
-		phase, maps
+		(Uint32)(y & 3), maps
 	);
 }
 
@@ -151,21 +144,16 @@ static void convertRectBatch(const stconvertstate_t *state, Uint8 *dst, int numr
 	int i;
 
 	if (merged_count > 0) {
-		for (i = 0; i < numrects; ++i) {
-			const xbiosstrect_t *rect;
-
-			rect = &merged_rects[i];
+		for (i = 0; i < merged_count; ++i) {
+			const xbiosstrect_t *rect = &merged_rects[i];
 			convertRegion(state, dst, rect->x1, rect->y, rect->x2 - rect->x1, rect->h);
 		}
 		return;
 	}
 
 	for (i = 0; i < numrects; ++i) {
-		int x1;
-		int x2;
-
-		x1 = rects[i].x & ~15;
-		x2 = (rects[i].x + rects[i].w + 15) & ~15;
+		int x1 = rects[i].x & ~15;
+		int x2 = (rects[i].x + rects[i].w + 15) & ~15;
 		convertRegion(state, dst, x1, rects[i].y, x2 - x1, rects[i].h);
 	}
 }
@@ -258,10 +246,8 @@ static void copyBackBatch(_THIS, int numrects, SDL_Rect *rects, const xbiosstrec
 	int i;
 
 	if (merged_count > 0) {
-		for (i = 0; i < numrects; ++i) {
-			const xbiosstrect_t *rect;
-
-			rect = &merged_rects[i];
+		for (i = 0; i < merged_count; ++i) {
+			const xbiosstrect_t *rect = &merged_rects[i];
 			copyRect(
 				XBIOS_screens[XBIOS_fbnum ^ 1],
 				XBIOS_screens[XBIOS_fbnum],
@@ -273,11 +259,8 @@ static void copyBackBatch(_THIS, int numrects, SDL_Rect *rects, const xbiosstrec
 	}
 
 	for (i = 0; i < numrects; ++i) {
-		int x1;
-		int x2;
-
-		x1 = rects[i].x & ~15;
-		x2 = (rects[i].x + rects[i].w + 15) & ~15;
+		int x1 = rects[i].x & ~15;
+		int x2 = (rects[i].x + rects[i].w + 15) & ~15;
 		copyRect(
 			XBIOS_screens[XBIOS_fbnum ^ 1],
 			XBIOS_screens[XBIOS_fbnum],
@@ -332,8 +315,10 @@ static int alignRect(const SDL_Rect *rect, int max_w, int max_h, xbiosstrect_t *
 static int coalesceRects(const SDL_Rect *rects, int numrects, xbiosstrect_t *merged, int max_merged, int max_w, int max_h, int *dirty_area)
 {
 	Uint32 dirty_rows[ST_LOW_HEIGHT];
-	int active_idx[XBIOS_ST_MAX_SPANS_PER_ROW];
-	int next_active_idx[XBIOS_ST_MAX_SPANS_PER_ROW];
+	int span_a[XBIOS_ST_MAX_SPANS_PER_ROW];
+	int span_b[XBIOS_ST_MAX_SPANS_PER_ROW];
+	int *active_idx = span_a;
+	int *next_active_idx = span_b;
 	int span_x1[XBIOS_ST_MAX_SPANS_PER_ROW];
 	int span_x2[XBIOS_ST_MAX_SPANS_PER_ROW];
 	int merged_count, active_count;
@@ -407,10 +392,21 @@ static int coalesceRects(const SDL_Rect *rects, int numrects, xbiosstrect_t *mer
 				break;
 			}
 
+#if defined(__GNUC__)
+			{
+				unsigned long shifted = ~((unsigned long)(mask >> xbin1));
+				int run_len = __builtin_ctzl(shifted);
+				xbin2 = xbin1 + run_len - 1;
+				if (xbin2 >= cols) {
+					xbin2 = cols - 1;
+				}
+			}
+#else
 			xbin2 = xbin1;
 			while ((xbin2 + 1 < cols) && (mask & ((Uint32)1 << (xbin2 + 1)))) {
 				++xbin2;
 			}
+#endif
 
 			x1 = xbin1 << XBIOS_ST_TILE_SHIFT;
 			x2 = (xbin2 + 1) << XBIOS_ST_TILE_SHIFT;
@@ -478,10 +474,13 @@ static int coalesceRects(const SDL_Rect *rects, int numrects, xbiosstrect_t *mer
 			}
 		}
 
-		active_count = next_active_count;
-		for (i = 0; i < active_count; ++i) {
-			active_idx[i] = next_active_idx[i];
+		/* Swap ping-pong buffers instead of copying. */
+		{
+			int *tmp = active_idx;
+			active_idx = next_active_idx;
+			next_active_idx = tmp;
 		}
+		active_count = next_active_count;
 	}
 
 	if (dirty_area) {
@@ -500,18 +499,14 @@ static int coalesceRects(const SDL_Rect *rects, int numrects, xbiosstrect_t *mer
 void SDL_XBIOS_ST_UpdateRects(_THIS, int numrects, SDL_Rect *rects)
 {
 	SDL_Surface *surface = this->screen;
-	stconvertstate_t convert;
+	stconvertstate_t convert = {0};
 	int src_offset;
 	int did_full_refresh;
 	int merged_count;
 	int force_full_refresh;
 	int dirty_area;
 	int total_area;
-	int full_refresh_min_area;
-	int copyback_skip_min_area;
-	int adaptive_vsync_max_area;
 	xbiosstrect_t merged_rects[XBIOS_ST_MAX_BATCHED_RECTS];
-	SDL_Rect full_rect;
 
 	maybeWarnShadowBuffer(this);
 
@@ -521,10 +516,10 @@ void SDL_XBIOS_ST_UpdateRects(_THIS, int numrects, SDL_Rect *rects)
 	force_full_refresh = 0;
 	dirty_area = 0;
 	total_area = surface->w * surface->h;
-	full_refresh_min_area = (total_area * xbios_st_full_refresh_threshold_pct + 99) / 100;
-	copyback_skip_min_area = (total_area * XBIOS_ST_COPYBACK_SKIP_PCT + 99) / 100;
-	adaptive_vsync_max_area = (total_area * XBIOS_ST_ADAPTIVE_VSYNC_PCT) / 100;
-	SDL_memset(&convert, 0, sizeof(convert));
+
+	/* Area thresholds are precomputed at mode init (see loadPerfHints). They
+	   are only consulted in the lowres/dither path where total_area is always
+	   XBIOS_ST_TOTAL_AREA, so compile-time constants are safe for the others. */
 
 	if (initConvertState(this, surface, src_offset, &convert)) {
 		if (convert.use_dither) {
@@ -570,7 +565,7 @@ void SDL_XBIOS_ST_UpdateRects(_THIS, int numrects, SDL_Rect *rects)
 			}
 
 			if (convert.use_dither && (dirty_area > 0) &&
-			    (dirty_area >= full_refresh_min_area)) {
+			    (dirty_area >= xbios_st_full_refresh_min_area)) {
 				force_full_refresh = 1;
 			}
 		} else if (convert.use_dither) {
@@ -583,18 +578,14 @@ void SDL_XBIOS_ST_UpdateRects(_THIS, int numrects, SDL_Rect *rects)
 			if (!convert.is_lowres ||
 			    ((xbios_st_singlebuf_vsync_mode > 0) &&
 			     ((xbios_st_singlebuf_vsync_mode < 2) ||
-			      (dirty_area <= adaptive_vsync_max_area)))) {
+			      (dirty_area <= XBIOS_ST_ADAPTIVE_VSYNC_AREA)))) {
 				(*XBIOS_vsync)(this);
 			}
 		}
 #endif
 
 		if (convert.use_dither && force_full_refresh) {
-			full_rect.x = 0;
-			full_rect.y = 0;
-			full_rect.w = surface->w;
-			full_rect.h = surface->h;
-			convertRectBatch(&convert, XBIOS_screens[XBIOS_fbnum], 1, &full_rect, NULL, 0);
+			convertRegion(&convert, XBIOS_screens[XBIOS_fbnum], 0, 0, surface->w, surface->h);
 			did_full_refresh = 1;
 			dirty_area = total_area;
 			numrects = 0;
@@ -610,7 +601,7 @@ void SDL_XBIOS_ST_UpdateRects(_THIS, int numrects, SDL_Rect *rects)
 
 		swapBuffers(this);
 		copy_back = !did_full_refresh && (numrects > 0);
-		if (copy_back && (dirty_area >= copyback_skip_min_area)) {
+		if (copy_back && (dirty_area >= XBIOS_ST_COPYBACK_SKIP_AREA)) {
 			copy_back = 0;
 		}
 
@@ -623,7 +614,7 @@ void SDL_XBIOS_ST_UpdateRects(_THIS, int numrects, SDL_Rect *rects)
 
 int SDL_XBIOS_ST_FlipHWSurface(_THIS, SDL_Surface *surface)
 {
-	stconvertstate_t convert;
+	stconvertstate_t convert = {0};
 	int src_offset;
 	int dst_offset;
 	int copy_x, copy_y, copy_w, copy_h;
@@ -635,7 +626,6 @@ int SDL_XBIOS_ST_FlipHWSurface(_THIS, SDL_Surface *surface)
 	copy_w = surface->w;
 	copy_h = surface->h;
 	is_full_redraw = 0;
-	SDL_memset(&convert, 0, sizeof(convert));
 
 	maybeWarnShadowBuffer(this);
 

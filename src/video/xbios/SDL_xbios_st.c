@@ -69,6 +69,8 @@ int st_map_used_count = 0;
 const char *st_render_mode = ST_RENDER_COLOR;
 int has_blitter = -1;
 int xbios_st_full_refresh_threshold_pct = XBIOS_ST_DEFAULT_FULL_REFRESH_PCT;
+int xbios_st_full_refresh_min_area =
+	(XBIOS_ST_TOTAL_AREA * XBIOS_ST_DEFAULT_FULL_REFRESH_PCT + 99) / 100;
 int xbios_st_singlebuf_vsync_mode = XBIOS_ST_DEFAULT_SINGLEBUF_VSYNC;
 
 static void listModes(_THIS, int actually_add);
@@ -111,6 +113,8 @@ static void loadPerfHints(void)
 		XBIOS_ST_DEFAULT_FULL_REFRESH_PCT,
 		0, 100
 	);
+	xbios_st_full_refresh_min_area =
+		(XBIOS_ST_TOTAL_AREA * xbios_st_full_refresh_threshold_pct + 99) / 100;
 	xbios_st_singlebuf_vsync_mode = parseEnvInt(
 		"SDL_XBIOS_ST_SINGLEBUF_VSYNC",
 		XBIOS_ST_DEFAULT_SINGLEBUF_VSYNC,

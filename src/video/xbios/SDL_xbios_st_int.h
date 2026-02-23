@@ -35,6 +35,7 @@
 #define XBIOS_ST_TILE_SHIFT 4
 #define XBIOS_ST_TILE_WIDTH (1 << XBIOS_ST_TILE_SHIFT)
 #define XBIOS_ST_MAX_SPANS_PER_ROW (ST_LOW_WIDTH / XBIOS_ST_TILE_WIDTH)
+#define XBIOS_ST_TOTAL_AREA        (ST_LOW_WIDTH * ST_LOW_HEIGHT)
 
 #ifndef XBIOS_ST_DEFAULT_FULL_REFRESH_PCT
 #define XBIOS_ST_DEFAULT_FULL_REFRESH_PCT 60
@@ -42,12 +43,17 @@
 #ifndef XBIOS_ST_COPYBACK_SKIP_PCT
 #define XBIOS_ST_COPYBACK_SKIP_PCT 85
 #endif
+/* Precomputed area thresholds for ST low-res (used only in that path). */
+#define XBIOS_ST_COPYBACK_SKIP_AREA \
+    ((XBIOS_ST_TOTAL_AREA * XBIOS_ST_COPYBACK_SKIP_PCT + 99) / 100)
 #ifndef XBIOS_ST_DEFAULT_SINGLEBUF_VSYNC
 #define XBIOS_ST_DEFAULT_SINGLEBUF_VSYNC 2
 #endif
 #ifndef XBIOS_ST_ADAPTIVE_VSYNC_PCT
 #define XBIOS_ST_ADAPTIVE_VSYNC_PCT 25
 #endif
+#define XBIOS_ST_ADAPTIVE_VSYNC_AREA \
+    ((XBIOS_ST_TOTAL_AREA * XBIOS_ST_ADAPTIVE_VSYNC_PCT) / 100)
 
 #ifndef SDL_XBIOS_ST_RENDER_MODE
 #define SDL_XBIOS_ST_RENDER_MODE "color"
@@ -89,6 +95,7 @@ extern int st_map_used_count;
 extern const char *st_render_mode;
 extern int has_blitter;
 extern int xbios_st_full_refresh_threshold_pct;
+extern int xbios_st_full_refresh_min_area;
 extern int xbios_st_singlebuf_vsync_mode;
 
 void SDL_XBIOS_ST_InitColorTable(void);

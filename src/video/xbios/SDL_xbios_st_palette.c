@@ -31,14 +31,17 @@
 #include "../ataricommon/SDL_ataric2p_s.h"
 #include "SDL_xbios_st_int.h"
 
+/* Manhattan distance: avoids MULS (slow on 68000) and is sufficient for
+   palette selection and dither-spread ratio computation. */
 static __inline__ int colorDist(const SDL_Color *c1, const SDL_Color *c2)
 {
-	int dr, dg, db;
-
-	dr = (int)c1->r - (int)c2->r;
-	dg = (int)c1->g - (int)c2->g;
-	db = (int)c1->b - (int)c2->b;
-	return (dr * dr) + (dg * dg) + (db * db);
+	int dr = (int)c1->r - (int)c2->r;
+	int dg = (int)c1->g - (int)c2->g;
+	int db = (int)c1->b - (int)c2->b;
+	if (dr < 0) dr = -dr;
+	if (dg < 0) dg = -dg;
+	if (db < 0) db = -db;
+	return dr + dg + db;
 }
 
 static __inline__ Uint16 ataricomponent(Uint8 value)
@@ -270,6 +273,10 @@ static void initDitherPhaseMaps(void)
 	int row;
 	int i;
 
+	/* st_dither_phase_maps holds direct pointers into st_dither_map rows.
+	   Because st_dither_map is a static array, these pointers remain valid
+	   when the map data is updated in-place by updatePalette or
+	   SDL_XBIOS_ST_UpdateGrayPalette — no re-initialisation is needed. */
 	for (col = 0; col < 4; ++col) {
 		for (row = 0; row < 4; ++row) {
 			const int phase = row << 2;
@@ -404,11 +411,8 @@ int SDL_XBIOS_ST_SetColors(_THIS, int firstcolor, int ncolors, SDL_Color *colors
 
 	switch (action) {
 	case ST_PAL_REMAP_FULL:
-		updatePalette(this, 1);
-		st_force_full_refresh = 1;
-		break;
 	case ST_PAL_REMAP_FAST:
-		updatePalette(this, 0);
+		updatePalette(this, action == ST_PAL_REMAP_FULL);
 		st_force_full_refresh = 1;
 		break;
 	case ST_PAL_HW_ONLY:
