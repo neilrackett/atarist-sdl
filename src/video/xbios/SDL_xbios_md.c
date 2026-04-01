@@ -38,7 +38,6 @@
 /* =========================================================================
  * MD hardware addresses (ST bus view)
  * ========================================================================= */
-#define MD_ROM4_BASE            0xFA0000UL
 #define MD_FRAMEBUFFER_ADDR     0xFA8000UL   /* 32 000 B planar output        */
 #define MD_RANDOM_TOKEN_ADDR    0xFAF000UL   /* 4 B — RP2040 completion token  */
 #define MD_RANDOM_SEED_ADDR     0xFAF004UL   /* 4 B — token seed for sync      */
@@ -71,11 +70,7 @@
 #define MD_MAX_WIDTH  320
 #define MD_MAX_HEIGHT 200
 
-/* Maximum inline pixel bytes per BLIT_SURFACE command.
- * Limited by MAX_PROTOCOL_PAYLOAD_SIZE (2112 B) minus the 16-byte preamble.
- * Use 6 rows × 320 B = 1920 B to stay safely under the limit. */
-#define MD_MAX_CHUNK_BYTES  1920
-#define MD_ROWS_PER_CHUNK   6    /* 6 × 320 = 1920 */
+#define MD_ROWS_PER_CHUNK   6    /* 6 × 320 B = 1920 B, safely under 2096 B limit */
 
 /* =========================================================================
  * The single video mode this driver advertises: 320×200 @ 8bpp chunky.
@@ -219,15 +214,9 @@ int SDL_XBIOS_MD_Detect(void)
     }
     /* If no _VDO cookie, assume ST (pre-TOS 1.06) — continue */
 
-    /* Send PING and verify response */
     if (md_send_command(SDL_MD_PING, MD_PING_MAGIC, 0, 0, NULL, 0) != 0) {
-        return 0;  /* timeout → MD/SDL not present */
+        return 0;
     }
-
-    /* md_send_command already confirmed $FAF000 == expected_token.
-     * For PING, the RP2040 writes MD_PING_MAGIC as the token, which is
-     * also what expected_token equals when seed happens to encode it.
-     * The timeout loop in md_send_command is the detection gate. */
     return 1;
 }
 
@@ -316,7 +305,7 @@ static void swapVbuffers_MD(_THIS)
         if (rows > MD_ROWS_PER_CHUNK) rows = MD_ROWS_PER_CHUNK;
         bytes = rows * sdl_md_w;
 
-        d3 = (Uint32)((Uint32)0 << 16) | (Uint32)(Uint16)y;
+        d3 = (Uint32)(Uint16)y;
         d4 = (Uint32)((Uint32)sdl_md_w << 16) | (Uint32)(Uint16)rows;
         d5 = (Uint32)((Uint32)sdl_md_w << 16);
 
