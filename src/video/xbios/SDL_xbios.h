@@ -186,4 +186,8 @@ void SDL_XBIOS_VideoInit_Ctpci(_THIS);
 /* SDL_xbios_nova.c */
 void SDL_XBIOS_VideoInit_Nova(_THIS, void *cookie_nova);
 
+/* SDL_xbios_md.c */
+void SDL_XBIOS_VideoInit_MD(_THIS);
+int  SDL_XBIOS_MD_Detect(void);
+
 #endif /* _SDL_xbios_h */

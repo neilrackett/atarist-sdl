@@ -215,6 +215,13 @@ static SDL_VideoDevice *XBIOS_CreateDevice(int devindex)
 
 	device->hidden->updRects = XBIOS_UpdateRects;
 
+	/* Check for SidecarTridge Multi-device SDL offload first.
+	 * Only available on ST/STE; detection sends a PING over the cartridge bus. */
+	if (SDL_XBIOS_MD_Detect()) {
+		SDL_XBIOS_VideoInit_MD(device);
+		return device;
+	}
+
 	/* Setup device specific functions, default to ST for everything */
 	SDL_XBIOS_VideoInit_ST(device, cookie_vdo);
 
