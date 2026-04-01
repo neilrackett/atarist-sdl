@@ -23,6 +23,7 @@
 
 #define NBOATS 5
 #define SPEED 2
+#define FPS_TEXT_SCALE 1
 
 #ifndef MIN
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
@@ -30,6 +31,139 @@
 #ifndef MAX
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #endif
+
+static const Uint8 glyph_blank[5] = { 0, 0, 0, 0, 0 };
+static const Uint8 glyph_colon[5] = { 0, 2, 0, 2, 0 };
+static const Uint8 glyph_dot[5] = { 0, 0, 0, 0, 2 };
+static const Uint8 glyph_0[5] = { 7, 5, 5, 5, 7 };
+static const Uint8 glyph_1[5] = { 2, 6, 2, 2, 7 };
+static const Uint8 glyph_2[5] = { 7, 1, 7, 4, 7 };
+static const Uint8 glyph_3[5] = { 7, 1, 7, 1, 7 };
+static const Uint8 glyph_4[5] = { 5, 5, 7, 1, 1 };
+static const Uint8 glyph_5[5] = { 7, 4, 7, 1, 7 };
+static const Uint8 glyph_6[5] = { 7, 4, 7, 5, 7 };
+static const Uint8 glyph_7[5] = { 7, 1, 1, 1, 1 };
+static const Uint8 glyph_8[5] = { 7, 5, 7, 5, 7 };
+static const Uint8 glyph_9[5] = { 7, 5, 7, 1, 7 };
+static const Uint8 glyph_F[5] = { 7, 4, 6, 4, 4 };
+static const Uint8 glyph_P[5] = { 6, 5, 6, 4, 4 };
+static const Uint8 glyph_S[5] = { 3, 4, 2, 1, 6 };
+
+static const Uint8 *GetGlyph3x5(char c)
+{
+    switch (c) {
+    case '0': return glyph_0;
+    case '1': return glyph_1;
+    case '2': return glyph_2;
+    case '3': return glyph_3;
+    case '4': return glyph_4;
+    case '5': return glyph_5;
+    case '6': return glyph_6;
+    case '7': return glyph_7;
+    case '8': return glyph_8;
+    case '9': return glyph_9;
+    case 'F': return glyph_F;
+    case 'P': return glyph_P;
+    case 'S': return glyph_S;
+    case ':': return glyph_colon;
+    case '.': return glyph_dot;
+    case ' ': return glyph_blank;
+    default: return glyph_blank;
+    }
+}
+
+static SDL_bool RectsOverlap(const SDL_Rect *a, const SDL_Rect *b)
+{
+    int ax2 = a->x + a->w;
+    int ay2 = a->y + a->h;
+    int bx2 = b->x + b->w;
+    int by2 = b->y + b->h;
+
+    if (ax2 <= b->x || bx2 <= a->x || ay2 <= b->y || by2 <= a->y)
+	return SDL_FALSE;
+    return SDL_TRUE;
+}
+
+static void FillRect8Raw(SDL_Surface *screen, int x, int y, int w, int h, Uint8 color)
+{
+    int row;
+
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > screen->w) w = screen->w - x;
+    if (y + h > screen->h) h = screen->h - y;
+    if (w <= 0 || h <= 0) return;
+
+    for (row = 0; row < h; ++row) {
+	SDL_memset((Uint8 *)screen->pixels + (y + row) * screen->pitch + x, color, w);
+    }
+}
+
+static void DrawText3x5Raw(SDL_Surface *screen, int x, int y, const char *text, Uint8 color, int scale)
+{
+    int i, row, col, sr, sc;
+
+    for (i = 0; text[i] != '\0'; ++i) {
+	const Uint8 *glyph = GetGlyph3x5(text[i]);
+	for (row = 0; row < 5; ++row) {
+	    Uint8 bits = glyph[row];
+	    for (col = 0; col < 3; ++col) {
+		if (bits & (1 << (2 - col))) {
+		    int px = x + i * (4 * scale) + col * scale;
+		    int py = y + row * scale;
+		    if (px < 0 || px + scale > screen->w) continue;
+		    if (py < 0 || py + scale > screen->h) continue;
+		    for (sr = 0; sr < scale; ++sr) {
+			Uint8 *dst = (Uint8 *)screen->pixels + (py + sr) * screen->pitch + px;
+			for (sc = 0; sc < scale; ++sc) {
+			    dst[sc] = color;
+			}
+		    }
+		}
+	    }
+	}
+    }
+}
+
+static SDL_Rect GetFPSRect(SDL_Surface *screen)
+{
+    SDL_Rect r;
+    int text_w = (9 * (4 * FPS_TEXT_SCALE)) - FPS_TEXT_SCALE; /* "FPS:000.0" */
+    int text_h = 5 * FPS_TEXT_SCALE;
+    int margin = 4;
+
+    r.x = margin;
+    r.y = margin;
+    r.w = text_w + 4;
+    r.h = text_h + 4;
+    if (r.x + r.w > screen->w) r.w = screen->w - r.x;
+    if (r.y + r.h > screen->h) r.h = screen->h - r.y;
+    if (r.w < 0) r.w = 0;
+    if (r.h < 0) r.h = 0;
+    return r;
+}
+
+static void DrawFPSOverlay(SDL_Surface *screen, int fps_tenths, Uint8 fg, Uint8 bg, SDL_Rect *out_rect)
+{
+    char text[16];
+    SDL_Rect r = GetFPSRect(screen);
+
+    if (fps_tenths < 0) fps_tenths = 0;
+    if (fps_tenths > 9999) fps_tenths = 9999;
+
+    if (SDL_LockSurface(screen) < 0)
+	return;
+
+    FillRect8Raw(screen, r.x, r.y, r.w, r.h, bg);
+    SDL_snprintf(text, sizeof(text), "FPS:%3d.%1d", fps_tenths / 10, fps_tenths % 10);
+    DrawText3x5Raw(screen, r.x + 2, r.y + 2, text, fg, FPS_TEXT_SCALE);
+
+    SDL_UnlockSurface(screen);
+
+    if (out_rect) {
+	*out_rect = r;
+    }
+}
 
 /*
  * wave colours: Made by taking a narrow cross-section of a wave picture
@@ -83,11 +217,11 @@ static SDL_Surface *make_bg(SDL_Surface *screen, int startcol)
     /* Make a wavy background pattern using colours 0-63 */
     if(SDL_LockSurface(bg) < 0)
 	sdlerr("locking background");
-    for(i = 0; i < SCRH; i++) {
+    for(i = 0; i < bg->h; i++) {
 	Uint8 *p = (Uint8 *)bg->pixels + i * bg->pitch;
 	int j, d;
 	d = 0;
-	for(j = 0; j < SCRW; j++) {
+	for(j = 0; j < bg->w; j++) {
 	    int v = MAX(d, -2);
 	    v = MIN(v, 2);
 	    if(i > 0)
@@ -136,15 +270,33 @@ int main(int argc, char **argv)
     SDL_Surface *boat[2];
     unsigned vidflags = 0;
     unsigned start;
+    Uint32 fps_then;
+    Uint32 fps_frames;
+    Uint32 fps_now;
     int fade_max = 400;
     int fade_level, fade_dir;
     int boatcols, frames, i, red;
     int boatx[NBOATS], boaty[NBOATS], boatdir[NBOATS];
+    int boats = NBOATS;
+    int width, height, bpp;
     int gamma_fade = 0;
     int gamma_ramp = 0;
+    int palette_step = 1;
+    int palette_dirty_only = 0;
+    int show_fps = 1;
+    int log_fps = 0;
+    int stfast = 0;
+    int fps_tenths = 0;
+    Uint8 fps_fg = 255;
+    Uint8 fps_bg = 0;
+    int mode_specified = 0;
 
     if(SDL_Init(SDL_INIT_VIDEO) < 0)
 	sdlerr("initialising SDL");
+
+    width = SCRW;
+    height = SCRH;
+    bpp = 8;
 
     while(--argc) {
 	++argv;
@@ -152,27 +304,71 @@ int main(int argc, char **argv)
 	    vidflags |= SDL_HWSURFACE;
 	else if(strcmp(*argv, "-fullscreen") == 0)
 	    vidflags |= SDL_FULLSCREEN;
+	else if(strcmp(*argv, "-width") == 0 && argc > 0)
+	    width = atoi(*++argv), --argc, mode_specified = 1;
+	else if(strcmp(*argv, "-height") == 0 && argc > 0)
+	    height = atoi(*++argv), --argc, mode_specified = 1;
+	else if(strcmp(*argv, "-bpp") == 0 && argc > 0)
+	    bpp = atoi(*++argv), --argc, mode_specified = 1;
 	else if(strcmp(*argv, "-nofade") == 0)
 	    fade_max = 1;
+	else if((strcmp(*argv, "-fademax") == 0) && argc > 0) {
+	    fade_max = atoi(*++argv), --argc;
+	    if(fade_max < 1)
+		fade_max = 1;
+	}
 	else if(strcmp(*argv, "-gamma") == 0)
 	    gamma_fade = 1;
 	else if(strcmp(*argv, "-gammaramp") == 0)
 	    gamma_ramp = 1;
+	else if(strcmp(*argv, "-boats") == 0 && argc > 0) {
+	    boats = atoi(*++argv), --argc;
+	    if(boats < 1) boats = 1;
+	    if(boats > NBOATS) boats = NBOATS;
+	}
+	else if(strcmp(*argv, "-palstep") == 0 && argc > 0) {
+	    palette_step = atoi(*++argv), --argc;
+	    if(palette_step < 1) palette_step = 1;
+	}
+	else if(strcmp(*argv, "-paldirty") == 0)
+	    palette_dirty_only = 1;
+	else if(strcmp(*argv, "-nofps") == 0)
+	    show_fps = 0;
+	else if(strcmp(*argv, "-fpslog") == 0)
+	    log_fps = 1;
+	else if(strcmp(*argv, "-stfast") == 0)
+	    stfast = 1;
 	else {
 	    fprintf(stderr,
 		    "usage: testpalette "
-		    " [-hw] [-fullscreen] [-nofade] [-gamma] [-gammaramp]\n");
+		    " [-width N] [-height N] [-bpp N]"
+		    " [-hw] [-fullscreen] [-nofade]"
+		    " [-fademax N] [-gamma] [-gammaramp]"
+		    " [-boats N] [-palstep N] [-paldirty] [-nofps] [-fpslog] [-stfast]\n");
 	    quit(1);
 	}
     }
 
-    /* Ask explicitly for 8bpp and a hardware palette */
-    if((screen = SDL_SetVideoMode(SCRW, SCRH, 8, vidflags | SDL_HWPALETTE)) == NULL) {
-	fprintf(stderr, "error setting %dx%d 8bpp indexed mode: %s\n",
-		SCRW, SCRH, SDL_GetError());
-	quit(1);
+    if(stfast) {
+	boats = 3;
+	palette_step = 2;
     }
 
+    /* Ask explicitly for 8bpp and a hardware palette */
+    if((screen = SDL_SetVideoMode(width, height, bpp, vidflags | SDL_HWPALETTE)) == NULL) {
+	if(!mode_specified) {
+	    width = 320;
+	    height = 200;
+	    bpp = 8;
+	    screen = SDL_SetVideoMode(width, height, bpp,
+				      vidflags | SDL_HWPALETTE);
+	}
+    }
+    if(screen == NULL) {
+	fprintf(stderr, "error setting %dx%dx%d indexed mode: %s\n",
+		width, height, bpp, SDL_GetError());
+	quit(1);
+    }
     if (vidflags & SDL_FULLSCREEN) SDL_ShowCursor (SDL_FALSE);
 
     if((boat[0] = SDL_LoadBMP("sail.bmp")) == NULL)
@@ -220,21 +416,32 @@ int main(int argc, char **argv)
     SDL_Flip(screen);		/* actually put the background on screen */
 
     /* determine initial boat placements */
-    for(i = 0; i < NBOATS; i++) {
-	boatx[i] = (rand() % (SCRW + boat[0]->w)) - boat[0]->w;
-	boaty[i] = i * (SCRH - boat[0]->h) / (NBOATS - 1);
+    for(i = 0; i < boats; i++) {
+	boatx[i] = (rand() % (screen->w + boat[0]->w)) - boat[0]->w;
+	if (boats > 1) {
+	    boaty[i] = i * (screen->h - boat[0]->h) / (boats - 1);
+	} else {
+	    boaty[i] = (screen->h - boat[0]->h) / 2;
+	}
 	boatdir[i] = ((rand() >> 5) & 1) * 2 - 1;
     }
 
     start = SDL_GetTicks();
+    fps_then = start;
+    fps_frames = 0;
     frames = 0;
     fade_dir = 1;
     fade_level = 0;
     do {
 	SDL_Event e;
-	SDL_Rect updates[NBOATS];
+	SDL_Rect updates[NBOATS + 1];
 	SDL_Rect r;
+	SDL_Rect fps_rect;
+	SDL_Rect fps_target;
 	int redphase;
+	int nupdates;
+	int palette_changed = 0;
+	int fps_needs_redraw = 0;
 
 	/* A small event loop: just exit on any key or mouse button event */
 	while(SDL_PollEvent(&e)) {
@@ -247,11 +454,11 @@ int main(int argc, char **argv)
 	}
 
 	/* move boats */
-	for(i = 0; i < NBOATS; i++) {
+	for(i = 0; i < boats; i++) {
 	    int old_x = boatx[i];
 	    /* update boat position */
 	    boatx[i] += boatdir[i] * SPEED;
-	    if(boatx[i] <= -boat[0]->w || boatx[i] >= SCRW)
+	    if(boatx[i] <= -boat[0]->w || boatx[i] >= screen->w)
 		boatdir[i] = -boatdir[i];
 
 	    /* paint over the old boat position */
@@ -272,11 +479,12 @@ int main(int argc, char **argv)
 		updates[i].w += updates[i].x;
 		updates[i].x = 0;
 	    }
-	    if(updates[i].x + updates[i].w > SCRW)
-		updates[i].w = SCRW - updates[i].x;
+	    if(updates[i].x + updates[i].w > screen->w)
+		updates[i].w = screen->w - updates[i].x;
 	}
+	nupdates = boats;
 
-	for(i = 0; i < NBOATS; i++) {
+	for(i = 0; i < boats; i++) {
 	    /* paint boat on new position */
 	    r.x = boatx[i];
 	    r.y = boaty[i];
@@ -325,10 +533,52 @@ int main(int argc, char **argv)
 	redphase = frames % 64;
 	cmap[red].r = (int)(255 * sin(redphase * M_PI / 63));
 
-	SDL_SetPalette(screen, SDL_PHYSPAL, cmap, 0, boatcols + 64);
+	if ((frames % palette_step) == 0) {
+	    SDL_SetPalette(screen, SDL_PHYSPAL, cmap, 0, boatcols + 64);
+	    palette_changed = 1;
+	}
+
+	fps_now = SDL_GetTicks();
+	fps_frames++;
+	if (fps_now > fps_then && (fps_now - fps_then) >= 1000) {
+	    fps_tenths = (int)((fps_frames * 10000) / (fps_now - fps_then));
+	    fps_then = fps_now;
+	    fps_frames = 0;
+	    fps_needs_redraw = 1;
+		if (log_fps) {
+		    printf("fps %d.%d\n", fps_tenths / 10, fps_tenths % 10);
+		}
+	}
+
+	if (palette_changed && !palette_dirty_only) {
+	    updates[0].x = 0;
+	    updates[0].y = 0;
+	    updates[0].w = screen->w;
+	    updates[0].h = screen->h;
+	    nupdates = 1;
+	}
+
+	if (show_fps) {
+	    fps_target = GetFPSRect(screen);
+	    if (frames == 0) {
+		fps_needs_redraw = 1;
+	    } else {
+		for (i = 0; i < nupdates; i++) {
+		    if (RectsOverlap(&updates[i], &fps_target)) {
+			fps_needs_redraw = 1;
+			break;
+		    }
+		}
+	    }
+
+	    if (fps_needs_redraw) {
+		DrawFPSOverlay(screen, fps_tenths, fps_fg, fps_bg, &fps_rect);
+		updates[nupdates++] = fps_rect;
+	    }
+	}
 
 	/* update changed areas of the screen */
-	SDL_UpdateRects(screen, NBOATS, updates);
+	SDL_UpdateRects(screen, nupdates, updates);
 	frames++;
     } while(fade_level > 0);
 
@@ -339,4 +589,3 @@ int main(int argc, char **argv)
     SDL_Quit();
     return 0;
 }
-

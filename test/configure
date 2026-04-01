@@ -2914,7 +2914,7 @@ case "$host" in
         SYS_GL_LIBS=""
         ;;
     *-*-mint*)
-        EXE=""
+        EXE=".ttp"
         MATHLIB=""
         # Extract the first word of "osmesa-config", so it can be a program name with args.
 set dummy osmesa-config; ac_word=$2

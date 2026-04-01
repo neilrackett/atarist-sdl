@@ -17,6 +17,9 @@ build-deps
 *.so.*
 *.dll
 *.exe
+*.tos
+*.prg
+*.ttp
 *.o
 *.obj
 *.lib
@@ -35,7 +38,9 @@ build-deps
 *.tmp
 *.rej
 *.d
+*.log
 .vscode/**
+.claude
 
 # for Xcode
 *.mode1*

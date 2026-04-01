@@ -138,6 +138,7 @@ int main(int argc, char *argv[])
 	int    done;
 	SDL_Event event;
 	int width, height, bpp;
+	int mode_specified;
 
 	/* Initialize SDL */
 	if ( SDL_Init(SDL_INIT_VIDEO) < 0 ) {
@@ -149,19 +150,23 @@ int main(int argc, char *argv[])
 	width = 640;
 	height = 480;
 	bpp = 8;
+	mode_specified = 0;
 	videoflags = SDL_SWSURFACE;
 	while ( argc > 1 ) {
 		--argc;
 		if ( argv[argc-1] && (strcmp(argv[argc-1], "-width") == 0) ) {
 			width = atoi(argv[argc]);
+			mode_specified = 1;
 			--argc;
 		} else
 		if ( argv[argc-1] && (strcmp(argv[argc-1], "-height") == 0) ) {
 			height = atoi(argv[argc]);
+			mode_specified = 1;
 			--argc;
 		} else
 		if ( argv[argc-1] && (strcmp(argv[argc-1], "-bpp") == 0) ) {
 			bpp = atoi(argv[argc]);
+			mode_specified = 1;
 			--argc;
 		} else
 		if ( argv[argc] && (strcmp(argv[argc], "-hw") == 0) ) {
@@ -190,6 +195,12 @@ int main(int argc, char *argv[])
 
 	/* Set a video mode */
 	screen = CreateScreen(width, height, bpp, videoflags);
+	if ( (screen == NULL) && !mode_specified ) {
+		width = 320;
+		height = 200;
+		bpp = 8;
+		screen = CreateScreen(width, height, bpp, videoflags);
+	}
 	if ( screen == NULL ) {
 		exit(2);
 	}
