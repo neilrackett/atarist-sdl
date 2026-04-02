@@ -46,6 +46,7 @@
 #include "../ataricommon/SDL_atarigl_c.h"
 #include "../ataricommon/SDL_atarimxalloc_c.h"
 #include "../ataricommon/SDL_geminit_c.h"
+#include "../ataricommon/SDL_megaste.h"
 
 #include "SDL_xbios.h"
 #include "SDL_xbios_milan.h"
@@ -337,6 +338,9 @@ static int XBIOS_VideoInit(_THIS, SDL_PixelFormat *vformat)
 
 	/* Determine the screen depth (use default 8-bit depth) */
 	vformat->BitsPerPixel = 8;
+
+	/* Enable Mega STE turbo (16 MHz + cache) before saving mode */
+	SDL_MegaSTE_EnableTurbo();
 
 	/* Save current mode, may update current screen size or preferred depth */
 	(*XBIOS_saveMode)(this, vformat);
@@ -718,6 +722,7 @@ static void XBIOS_VideoQuit(_THIS)
 
 	/* Restore video mode and palette */
 #ifndef DEBUG_VIDEO_XBIOS
+	SDL_MegaSTE_RestoreTurbo();
 	(*XBIOS_restoreMode)(this);
 
 	(*XBIOS_vsync)(this);

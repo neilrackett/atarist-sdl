@@ -22,8 +22,16 @@
 
     Detects and uses the MD/SDL microfirmware when running on an Atari ST or
     STE (not TT or Falcon).  All C2P conversion and palette reduction runs on
-    the RP2040; the ST only maintains a chunky 8bpp surface in RAM and copies
-    the resulting planar frame from $FA8000 to the screen on each flip.
+    the RP2040; the ST uploads a chunky 8bpp surface each frame, the RP2040
+    writes the resulting planar frame to $FA8000, and the ST copies it to
+    screen RAM so the Shifter reads from ST RAM rather than ROM4.
+
+    Pointing Setscreen directly at ROM4 ($FA8000) causes the Shifter to
+    compete with the 68000 for ROM4 bus cycles on every scanline, starving
+    the BLIT_SURFACE commands.  Copying to screen RAM once per frame
+    eliminates this contention.  On STE the blitter handles the copy in
+    ~1 ms; on plain ST the CPU copy takes ~20 ms but still performs better
+    than continuous Shifter contention.
 */
 
 #include "SDL_config.h"
@@ -33,6 +41,7 @@
 
 #include "../SDL_sysvideo.h"
 #include "../ataricommon/SDL_atarimxalloc_c.h"
+#include "../ataricommon/SDL_megaste.h"
 #include "SDL_xbios.h"
 
 /* =========================================================================
@@ -65,12 +74,37 @@
 #define SDL_MD_PING         0x08u
 
 /* =========================================================================
- * Surface geometry (mirrored from the MD for ST-side calculations)
+ * Surface geometry
  * ========================================================================= */
-#define MD_MAX_WIDTH  320
-#define MD_MAX_HEIGHT 200
+#define MD_MAX_WIDTH   320
+#define MD_MAX_HEIGHT  200
+#define MD_PLANAR_SIZE 32000   /* 320×200 × 4 planes / 8 bits = 32 000 B */
 
 #define MD_ROWS_PER_CHUNK   6    /* 6 × 320 B = 1920 B, safely under 2096 B limit */
+
+/* =========================================================================
+ * STE blitter registers (hardware addresses, Atari STE reference manual)
+ * ========================================================================= */
+#define BLT_BASE        0xFFFF8A00UL
+#define BLT_SRC_INC_X   (*(volatile Uint16 *)(BLT_BASE + 0x02))
+#define BLT_SRC_INC_Y   (*(volatile Uint16 *)(BLT_BASE + 0x04))
+#define BLT_SRC_ADDR    (*(volatile Uint32 *)(BLT_BASE + 0x06))
+#define BLT_END_MASK1   (*(volatile Uint16 *)(BLT_BASE + 0x0A))
+#define BLT_END_MASK2   (*(volatile Uint16 *)(BLT_BASE + 0x0C))
+#define BLT_END_MASK3   (*(volatile Uint16 *)(BLT_BASE + 0x0E))
+#define BLT_DST_INC_X   (*(volatile Uint16 *)(BLT_BASE + 0x10))
+#define BLT_DST_INC_Y   (*(volatile Uint16 *)(BLT_BASE + 0x12))
+#define BLT_DST_ADDR    (*(volatile Uint32 *)(BLT_BASE + 0x14))
+#define BLT_X_COUNT     (*(volatile Uint16 *)(BLT_BASE + 0x18))
+#define BLT_Y_COUNT     (*(volatile Uint16 *)(BLT_BASE + 0x1A))
+#define BLT_HOP         (*(volatile Uint8  *)(BLT_BASE + 0x1C))
+#define BLT_OP          (*(volatile Uint8  *)(BLT_BASE + 0x1D))
+#define BLT_STATUS      (*(volatile Uint8  *)(BLT_BASE + 0x1E))
+
+#define BLT_STATUS_BUSY 0x80u  /* bit 7: blitter active */
+#define BLT_STATUS_HOG  0x40u  /* bit 6: hog mode (blitter has bus priority) */
+#define BLT_HOP_SOURCE  0x02u  /* HOP: use source */
+#define BLT_OP_COPY     0x03u  /* logical op: source replace destination */
 
 /* =========================================================================
  * The single video mode this driver advertises: 320×200 @ 8bpp chunky.
@@ -83,6 +117,9 @@ static const xbiosmode_t md_modes[] = {
 /* Cached surface dimensions set during allocVbuffers */
 static int sdl_md_w = MD_MAX_WIDTH;
 static int sdl_md_h = MD_MAX_HEIGHT;
+
+/* 1 if running on STE/MegaSTE (has hardware blitter), 0 for plain ST */
+static int md_is_ste = 0;
 
 /* =========================================================================
  * Low-level bus communication
@@ -110,12 +147,6 @@ static inline void md_send_word(Uint16 val)
  *   buf_len  : length of buf in bytes (0 if none)
  *
  * Returns 0 on success, -1 on timeout.
- *
- * Payload layout (all in 16-bit words on the bus):
- *   [random-token-lo] [random-token-hi]
- *   [d3-lo] [d3-hi] [d4-lo] [d4-hi] [d5-lo] [d5-hi]
- *   [buf words ...]
- * payload_size = 16 + ((buf_len + 1) & ~1)   (always in bytes, always even)
  */
 static int md_send_command(Uint8 cmd_id,
                            Uint32 d3, Uint32 d4, Uint32 d5,
@@ -130,14 +161,11 @@ static int md_send_command(Uint8 cmd_id,
     Uint32 timeout;
     Uint32 i;
 
-    /* Read the synchronisation seed written by the RP2040 */
     seed = *(volatile Uint32 *)MD_RANDOM_SEED_ADDR;
     token_lo = (Uint16)(seed & 0xFFFFu);
     token_hi = (Uint16)(seed >> 16);
 
-    /* The RP2040 uses TPROTO_GET_RANDOM_TOKEN which byte-swaps the 32-bit
-     * seed: token = (lo << 16) | hi — so the expected value at $FAF000 is
-     * the seed with its two 16-bit halves swapped. */
+    /* TPROTO_GET_RANDOM_TOKEN byte-swaps the 32-bit seed */
     expected_token = ((Uint32)token_lo << 16) | token_hi;
 
     buf_rounded = (Uint16)((buf_len + 1u) & ~1u);
@@ -145,55 +173,90 @@ static int md_send_command(Uint8 cmd_id,
 
     checksum = 0;
 
-    /* Header (not checksummed) */
     md_send_word(MD_CMD_MAGIC);
 
-    /* Command ID */
     checksum += cmd_id;
     md_send_word(cmd_id);
 
-    /* Payload size */
     checksum += payload_size;
     md_send_word(payload_size);
 
-    /* Random token (low then high word) */
     checksum += token_lo;  md_send_word(token_lo);
     checksum += token_hi;  md_send_word(token_hi);
 
-    /* d3 */
     checksum += (Uint16)(d3 & 0xFFFFu);         md_send_word((Uint16)(d3 & 0xFFFFu));
     checksum += (Uint16)((d3 >> 16) & 0xFFFFu); md_send_word((Uint16)((d3 >> 16) & 0xFFFFu));
 
-    /* d4 */
     checksum += (Uint16)(d4 & 0xFFFFu);         md_send_word((Uint16)(d4 & 0xFFFFu));
     checksum += (Uint16)((d4 >> 16) & 0xFFFFu); md_send_word((Uint16)((d4 >> 16) & 0xFFFFu));
 
-    /* d5 */
     checksum += (Uint16)(d5 & 0xFFFFu);         md_send_word((Uint16)(d5 & 0xFFFFu));
     checksum += (Uint16)((d5 >> 16) & 0xFFFFu); md_send_word((Uint16)((d5 >> 16) & 0xFFFFu));
 
-    /* Inline buffer: pack bytes into big-endian 16-bit words */
     for (i = 0; i < buf_rounded; i += 2) {
         Uint16 w;
         Uint8 hi_byte = buf[i];
         Uint8 lo_byte = (i + 1 < buf_len) ? buf[i + 1] : 0;
-        /* Big-endian: high byte first, matching move.w (a4)+,d0 on an
-         * even-aligned even-length buffer in the assembly implementation. */
         w = (Uint16)((hi_byte << 8) | lo_byte);
         checksum += w;
         md_send_word(w);
     }
 
-    /* Checksum */
     md_send_word(checksum);
 
-    /* Wait for the RP2040 to write the echoed token to $FAF000 */
     timeout = MD_COMMAND_TIMEOUT;
     while (*(volatile Uint32 *)MD_RANDOM_TOKEN_ADDR != expected_token) {
         if (--timeout == 0) return -1;
     }
 
     return 0;
+}
+
+/* =========================================================================
+ * Planar copy: $FA8000 → screen RAM
+ *
+ * After the RP2040 writes the planar frame to $FA8000 (ROM4), we copy it
+ * to screen RAM so the Shifter reads from ST RAM rather than ROM4.  This
+ * eliminates the Shifter/68000 bus contention that would otherwise occur
+ * on every scanline while the next frame's BLIT_SURFACE commands are being
+ * sent.
+ *
+ * STE: hardware blitter — ~1 ms, runs while 68000 can do other work.
+ * ST:  CPU longword loop — ~20 ms, unavoidable but still better than
+ *      continuous ROM4 contention every frame.
+ * ========================================================================= */
+static void md_copy_planar_to_screen(void *dst)
+{
+    if (md_is_ste) {
+        /* STE blitter: copy MD_PLANAR_SIZE bytes, source $FA8000, no skew */
+        BLT_SRC_INC_X = 2;           /* advance source by one word per step */
+        BLT_SRC_INC_Y = 0;           /* no line wrap adjustment needed      */
+        BLT_SRC_ADDR  = (Uint32)MD_FRAMEBUFFER_ADDR;
+        BLT_END_MASK1 = 0xFFFFu;     /* all bits of first word              */
+        BLT_END_MASK2 = 0xFFFFu;     /* all bits of middle words            */
+        BLT_END_MASK3 = 0xFFFFu;     /* all bits of last word               */
+        BLT_DST_INC_X = 2;
+        BLT_DST_INC_Y = 0;
+        BLT_DST_ADDR  = (Uint32)dst;
+        /* Transfer all 16 000 words as a single 1-line operation */
+        BLT_X_COUNT   = (Uint16)(MD_PLANAR_SIZE / 2);
+        BLT_Y_COUNT   = 1;
+        BLT_HOP       = BLT_HOP_SOURCE;
+        BLT_OP        = BLT_OP_COPY;
+        /* Start blitter in hog mode (bit 6 = hog, bit 7 = busy/start) */
+        BLT_STATUS    = (Uint8)(BLT_STATUS_HOG | BLT_STATUS_BUSY);
+        /* Wait for completion */
+        while (BLT_STATUS & BLT_STATUS_BUSY)
+            ;
+    } else {
+        /* Plain ST: CPU longword copy */
+        const Uint32 *src = (const Uint32 *)MD_FRAMEBUFFER_ADDR;
+        Uint32 *d = (Uint32 *)dst;
+        Uint32 n = MD_PLANAR_SIZE / 4;
+        while (n--) {
+            *d++ = *src++;
+        }
+    }
 }
 
 /* =========================================================================
@@ -243,17 +306,15 @@ static void setMode_MD(_THIS, const xbiosmode_t *new_video_mode)
 
     (void)new_video_mode;
 
-    /* Tell the RP2040 the surface geometry */
     md_send_command(SDL_MD_INIT,
                     ((Uint32)MD_MAX_WIDTH << 16) | (Uint32)MD_MAX_HEIGHT,
                     (Uint32)8 << 16,
                     0, NULL, 0);
 
-    /* Put the Atari hardware into ST low-res mode */
-    Setscreen(-1, XBIOS_screens[0], -1);
+    /* Point hardware at the planar screen-RAM buffer, enter ST low-res */
+    Setscreen(-1, XBIOS_screens[1], -1);
     Setscreen(-1, -1, ST_LOW >> 8);
 
-    /* Read back the 16 hardware colours the RP2040 computed and apply them */
     pal_return = (volatile Uint16 *)MD_PALETTE_RETURN_ADDR;
     for (i = 0; i < 16; i++) {
         TT_palette[i] = pal_return[i];
@@ -277,7 +338,7 @@ static void getScreenFormat_MD(_THIS, int bpp,
                                Uint32 *bmask, Uint32 *amask)
 {
     (void)bpp;
-    *rmask = *gmask = *bmask = *amask = 0;  /* palette mode */
+    *rmask = *gmask = *bmask = *amask = 0;
 }
 
 static int getLineWidth_MD(_THIS, const xbiosmode_t *new_video_mode,
@@ -285,14 +346,15 @@ static int getLineWidth_MD(_THIS, const xbiosmode_t *new_video_mode,
 {
     (void)new_video_mode;
     (void)bpp;
-    return width;  /* 1 byte per pixel in 8bpp chunky */
+    return width;
 }
 
 /*
- * swapVbuffers_MD — upload the chunky surface to the RP2040 in chunks,
- * trigger C2P, then point the ST hardware at the resulting planar frame.
+ * md_do_flip — shared implementation for swapVbuffers_MD and flipHW_MD.
+ * Uploads the full chunky surface, triggers C2P on the RP2040, copies the
+ * planar result from $FA8000 to screen RAM, and points the Shifter there.
  */
-static void swapVbuffers_MD(_THIS)
+static void md_do_flip(_THIS)
 {
     const Uint8 *src = (const Uint8 *)XBIOS_screens[0];
     int y;
@@ -313,23 +375,102 @@ static void swapVbuffers_MD(_THIS)
                         src + y * sdl_md_w, (Uint32)bytes);
     }
 
-    /* Trigger C2P on the RP2040 */
     md_send_command(SDL_MD_FLIP, 0, 0, 0, NULL, 0);
 
-    /* Point the ST hardware at the planar framebuffer the RP2040 wrote */
-    Setscreen(-1, (void *)MD_FRAMEBUFFER_ADDR, -1);
+    md_copy_planar_to_screen(XBIOS_screens[1]);
+    Setscreen(-1, XBIOS_screens[1], -1);
+}
+
+static void swapVbuffers_MD(_THIS)
+{
+    md_do_flip(this);
+}
+
+/*
+ * flipHW_MD — custom FlipHWSurface that always performs a full upload.
+ *
+ * XBIOS_FlipHWSurface only calls swapVbuffers inside the SDL_DOUBLEBUF
+ * branch.  Doom uses SDL_SWSURFACE | SDL_FULLSCREEN (no SDL_DOUBLEBUF), so
+ * without this hook SDL_Flip() would never trigger a transfer.
+ */
+static int flipHW_MD(_THIS, SDL_Surface *surface)
+{
+    (void)surface;
+    md_do_flip(this);
+    return 0;
+}
+
+/*
+ * updRects_MD — dirty-rect update path called by SDL_UpdateRects().
+ *
+ * Only sends the changed rectangle regions to the RP2040 rather than the
+ * full 64 KB surface.  Benefits games that use partial screen updates.
+ * For single-rect updates uses SDL_MD_UPDATE_RECT (partial C2P); for
+ * multi-rect uses SDL_MD_FLIP (full C2P, simpler than N partial C2Ps).
+ */
+static void updRects_MD(_THIS, int numrects, SDL_Rect *rects)
+{
+    const Uint8 *base = (const Uint8 *)XBIOS_screens[0];
+    int i;
+
+    for (i = 0; i < numrects; i++) {
+        int x = rects[i].x;
+        int y = rects[i].y;
+        int w = rects[i].w;
+        int h = rects[i].h;
+        int rows_per_chunk, row;
+        Uint32 d3, d4, d5;
+
+        /* Clamp to surface bounds */
+        if (x < 0) { w += x; x = 0; }
+        if (y < 0) { h += y; y = 0; }
+        if (x + w > sdl_md_w) w = sdl_md_w - x;
+        if (y + h > sdl_md_h) h = sdl_md_h - y;
+        if (w <= 0 || h <= 0) continue;
+
+        /* For narrow rects more rows fit per chunk */
+        rows_per_chunk = (w > 0) ? (1920 / w) : 1;
+        if (rows_per_chunk < 1) rows_per_chunk = 1;
+
+        for (row = y; row < y + h; row += rows_per_chunk) {
+            int chunk_rows = (y + h) - row;
+            int bytes;
+            if (chunk_rows > rows_per_chunk) chunk_rows = rows_per_chunk;
+            bytes = chunk_rows * w;
+
+            d3 = ((Uint32)(Uint16)x << 16) | (Uint32)(Uint16)row;
+            d4 = ((Uint32)(Uint16)w << 16) | (Uint32)(Uint16)chunk_rows;
+            d5 = (Uint32)((Uint32)sdl_md_w << 16);  /* srcpitch = surface pitch */
+
+            md_send_command(SDL_MD_BLIT_SURFACE, d3, d4, d5,
+                            base + row * sdl_md_w + x, (Uint32)bytes);
+        }
+    }
+
+    if (numrects == 1) {
+        /* Single rect: partial C2P only for the affected region */
+        Uint32 d3 = ((Uint32)(Uint16)rects[0].x << 16) | (Uint32)(Uint16)rects[0].y;
+        Uint32 d4 = ((Uint32)(Uint16)rects[0].w << 16) | (Uint32)(Uint16)rects[0].h;
+        md_send_command(SDL_MD_UPDATE_RECT, d3, d4, 0, NULL, 0);
+    } else if (numrects > 1) {
+        md_send_command(SDL_MD_FLIP, 0, 0, 0, NULL, 0);
+    } else {
+        return;  /* nothing to do */
+    }
+
+    md_copy_planar_to_screen(XBIOS_screens[1]);
+    Setscreen(-1, XBIOS_screens[1], -1);
 }
 
 static int allocVbuffers_MD(_THIS, const xbiosmode_t *new_video_mode,
                             int num_buffers, int bufsize)
 {
-    (void)new_video_mode;
-    (void)num_buffers;  /* MD driver always uses a single chunky buffer */
+    (void)num_buffers;
 
-    /* Cache surface dimensions for swapVbuffers_MD */
     sdl_md_w = new_video_mode->width;
     sdl_md_h = new_video_mode->height;
 
+    /* screens[0]: 8bpp chunky surface — application writes here */
     XBIOS_screensmem[0] = Atari_SysMalloc(bufsize, MX_STRAM);
     if (XBIOS_screensmem[0] == NULL) {
         SDL_SetError("MD: cannot allocate %d KB for chunky surface",
@@ -338,6 +479,17 @@ static int allocVbuffers_MD(_THIS, const xbiosmode_t *new_video_mode,
     }
     SDL_memset(XBIOS_screensmem[0], 0, bufsize);
     XBIOS_screens[0] = (void *)(((long)XBIOS_screensmem[0] + 255) & 0xFFFFFF00UL);
+
+    /* screens[1]: planar screen-RAM buffer — Shifter reads from here */
+    XBIOS_screensmem[1] = Atari_SysMalloc(MD_PLANAR_SIZE + 255, MX_STRAM);
+    if (XBIOS_screensmem[1] == NULL) {
+        Mfree(XBIOS_screensmem[0]);
+        XBIOS_screensmem[0] = NULL;
+        SDL_SetError("MD: cannot allocate planar screen buffer");
+        return 0;
+    }
+    SDL_memset(XBIOS_screensmem[1], 0, MD_PLANAR_SIZE + 255);
+    XBIOS_screens[1] = (void *)(((long)XBIOS_screensmem[1] + 255) & 0xFFFFFF00UL);
 
     return 1;
 }
@@ -349,17 +501,16 @@ static void freeVbuffers_MD(_THIS)
         XBIOS_screensmem[0] = NULL;
     }
     XBIOS_screens[0] = NULL;
+
+    if (XBIOS_screensmem[1]) {
+        Mfree(XBIOS_screensmem[1]);
+        XBIOS_screensmem[1] = NULL;
+    }
+    XBIOS_screens[1] = NULL;
 }
 
-/*
- * setColors_MD — called by SDL when the application sets or changes palette
- * entries.  Packs the full 256-entry palette into a 768-byte RGB buffer,
- * sends it to the RP2040 for median-cut reduction, then reads back the 16
- * resulting hardware colours and applies them via Setpalette().
- */
 static int setColors_MD(_THIS, int firstcolor, int ncolors, SDL_Color *colors)
 {
-    /* Build a full 256-entry RGB buffer from the current SDL palette */
     static Uint8 rgb_buf[768];
     SDL_Palette *pal = this->screen->format->palette;
     int i;
@@ -372,7 +523,6 @@ static int setColors_MD(_THIS, int firstcolor, int ncolors, SDL_Color *colors)
         rgb_buf[i * 3 + 1] = pal->colors[i].g;
         rgb_buf[i * 3 + 2] = pal->colors[i].b;
     }
-    /* Zero-fill any remaining entries */
     for (; i < 256; i++) {
         rgb_buf[i * 3 + 0] = 0;
         rgb_buf[i * 3 + 1] = 0;
@@ -389,7 +539,6 @@ static int setColors_MD(_THIS, int firstcolor, int ncolors, SDL_Color *colors)
         return 0;
     }
 
-    /* Read back the 16 hardware colours and apply them */
     pal_return = (volatile Uint16 *)MD_PALETTE_RETURN_ADDR;
     for (i = 0; i < 16; i++) {
         TT_palette[i] = pal_return[i];
@@ -404,16 +553,25 @@ static int setColors_MD(_THIS, int firstcolor, int ncolors, SDL_Color *colors)
  * ========================================================================= */
 void SDL_XBIOS_VideoInit_MD(_THIS)
 {
-    XBIOS_listModes    = listModes_MD;
-    XBIOS_saveMode     = saveMode_MD;
-    XBIOS_setMode      = setMode_MD;
-    XBIOS_restoreMode  = restoreMode_MD;
-    XBIOS_vsync        = vsync_MD;
+    long cookie_mch = 0;
+
+    /* Detect STE/MegaSTE for blitter support */
+    if (Getcookie(C__MCH, &cookie_mch) == C_FOUND) {
+        md_is_ste = ((cookie_mch >> 16) == MCH_STE) || (cookie_mch == MCH_MEGA_STE_COOKIE);
+    }
+
+    XBIOS_listModes     = listModes_MD;
+    XBIOS_saveMode      = saveMode_MD;
+    XBIOS_setMode       = setMode_MD;
+    XBIOS_restoreMode   = restoreMode_MD;
+    XBIOS_vsync         = vsync_MD;
     XBIOS_getScreenFormat = getScreenFormat_MD;
-    XBIOS_getLineWidth = getLineWidth_MD;
-    XBIOS_swapVbuffers = swapVbuffers_MD;
+    XBIOS_getLineWidth  = getLineWidth_MD;
+    XBIOS_swapVbuffers  = swapVbuffers_MD;
     XBIOS_allocVbuffers = allocVbuffers_MD;
     XBIOS_freeVbuffers  = freeVbuffers_MD;
+    XBIOS_updRects      = updRects_MD;
 
-    this->SetColors = setColors_MD;
+    this->SetColors      = setColors_MD;
+    this->FlipHWSurface  = flipHW_MD;
 }
