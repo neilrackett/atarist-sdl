@@ -47,10 +47,12 @@
 /* =========================================================================
  * MD hardware addresses (ST bus view)
  * ========================================================================= */
-#define MD_FRAMEBUFFER_ADDR     0xFA8000UL   /* 32 000 B planar output        */
-#define MD_RANDOM_TOKEN_ADDR    0xFAF000UL   /* 4 B — RP2040 completion token  */
-#define MD_RANDOM_SEED_ADDR     0xFAF004UL   /* 4 B — token seed for sync      */
-#define MD_PALETTE_RETURN_ADDR  0xFAF400UL   /* 32 B — 16 × uint16_t STE pal   */
+#define MD_FRAMEBUFFER0_ADDR    0xFA0000UL   /* 32 000 B planar slot 0         */
+#define MD_FRAMEBUFFER1_ADDR    0xFA7D00UL   /* 32 000 B planar slot 1         */
+#define MD_RANDOM_TOKEN_ADDR    0xFAFA00UL   /* 4 B — RP2040 completion token  */
+#define MD_RANDOM_SEED_ADDR     0xFAFA04UL   /* 4 B — token seed for sync      */
+#define MD_MAILBOX_ADDR         0xFAFA20UL   /* Async mailbox                  */
+#define MD_PALETTE_RETURN_ADDR  0xFAFA80UL   /* 32 B — 16 × uint16_t STE pal   */
 #define MD_ROMCMD_BASE          0xFB0000UL
 #define MD_ROMCMD_ADDR          (MD_ROMCMD_BASE + 0x8000UL)
 
@@ -72,6 +74,7 @@
 #define SDL_MD_FLIP         0x06u
 #define SDL_MD_UPDATE_RECT  0x07u
 #define SDL_MD_PING         0x08u
+#define SDL_MD_RELEASE_FRAME 0x09u
 
 /* =========================================================================
  * Surface geometry
@@ -81,6 +84,18 @@
 #define MD_PLANAR_SIZE 32000   /* 320×200 × 4 planes / 8 bits = 32 000 B */
 
 #define MD_ROWS_PER_CHUNK   6    /* 6 × 320 B = 1920 B, safely under 2096 B limit */
+
+typedef struct md_mailbox_t {
+    volatile Uint32 submit_seq;
+    volatile Uint32 ready_seq;
+    volatile Uint32 palette_seq;
+    volatile Uint32 worker_busy;
+    volatile Uint32 dropped_frames;
+    volatile Uint32 ready_planar_slot;
+    volatile Uint32 submit_time_us;
+    volatile Uint32 worker_start_us;
+    volatile Uint32 worker_end_us;
+} md_mailbox_t;
 
 /* =========================================================================
  * STE blitter registers (hardware addresses, Atari STE reference manual)
@@ -120,6 +135,9 @@ static int sdl_md_h = MD_MAX_HEIGHT;
 
 /* 1 if running on STE/MegaSTE (has hardware blitter), 0 for plain ST */
 static int md_is_ste = 0;
+static Uint32 md_next_submit_seq = 1;
+static Uint32 md_displayed_seq = 0;
+static Uint32 md_applied_palette_seq = 0;
 
 /* =========================================================================
  * Low-level bus communication
@@ -225,13 +243,18 @@ static int md_send_command(Uint8 cmd_id,
  * ST:  CPU longword loop — ~20 ms, unavoidable but still better than
  *      continuous ROM4 contention every frame.
  * ========================================================================= */
-static void md_copy_planar_to_screen(void *dst)
+static Uint32 md_planar_slot_addr(Uint32 slot)
+{
+    return (slot == 0) ? MD_FRAMEBUFFER0_ADDR : MD_FRAMEBUFFER1_ADDR;
+}
+
+static void md_copy_planar_to_screen(Uint32 src_addr, void *dst)
 {
     if (md_is_ste) {
-        /* STE blitter: copy MD_PLANAR_SIZE bytes, source $FA8000, no skew */
+        /* STE blitter: copy MD_PLANAR_SIZE bytes from the ready planar slot */
         BLT_SRC_INC_X = 2;           /* advance source by one word per step */
         BLT_SRC_INC_Y = 0;           /* no line wrap adjustment needed      */
-        BLT_SRC_ADDR  = (Uint32)MD_FRAMEBUFFER_ADDR;
+        BLT_SRC_ADDR  = src_addr;
         BLT_END_MASK1 = 0xFFFFu;     /* all bits of first word              */
         BLT_END_MASK2 = 0xFFFFu;     /* all bits of middle words            */
         BLT_END_MASK3 = 0xFFFFu;     /* all bits of last word               */
@@ -250,12 +273,60 @@ static void md_copy_planar_to_screen(void *dst)
             ;
     } else {
         /* Plain ST: CPU longword copy */
-        const Uint32 *src = (const Uint32 *)MD_FRAMEBUFFER_ADDR;
+        const Uint32 *src = (const Uint32 *)src_addr;
         Uint32 *d = (Uint32 *)dst;
         Uint32 n = MD_PLANAR_SIZE / 4;
         while (n--) {
             *d++ = *src++;
         }
+    }
+}
+
+static void md_apply_ready_palette(_THIS, Uint32 palette_seq)
+{
+    volatile Uint16 *pal_return;
+    int i;
+
+    if (palette_seq == md_applied_palette_seq) {
+        return;
+    }
+
+    pal_return = (volatile Uint16 *)MD_PALETTE_RETURN_ADDR;
+    for (i = 0; i < 16; i++) {
+        TT_palette[i] = pal_return[i];
+    }
+    Setpalette(TT_palette);
+    md_applied_palette_seq = palette_seq;
+}
+
+static void md_present_ready_frame(_THIS)
+{
+    volatile md_mailbox_t *mailbox = (volatile md_mailbox_t *)MD_MAILBOX_ADDR;
+    Uint32 ready_seq_a;
+    Uint32 ready_seq_b;
+    Uint32 palette_seq;
+    Uint32 slot;
+
+    ready_seq_a = mailbox->ready_seq;
+    if ((ready_seq_a == 0) || (ready_seq_a == md_displayed_seq)) {
+        return;
+    }
+
+    slot = mailbox->ready_planar_slot;
+    if (slot > 1) {
+        return;
+    }
+    palette_seq = mailbox->palette_seq;
+    ready_seq_b = mailbox->ready_seq;
+    if (ready_seq_a != ready_seq_b) {
+        return;
+    }
+
+    md_copy_planar_to_screen(md_planar_slot_addr(slot), XBIOS_screens[1]);
+    md_apply_ready_palette(this, palette_seq);
+    Setscreen(-1, XBIOS_screens[1], -1);
+    if (md_send_command(SDL_MD_RELEASE_FRAME, ready_seq_a, 0, 0, NULL, 0) == 0) {
+        md_displayed_seq = ready_seq_a;
     }
 }
 
@@ -314,6 +385,9 @@ static void setMode_MD(_THIS, const xbiosmode_t *new_video_mode)
     /* Point hardware at the planar screen-RAM buffer, enter ST low-res */
     Setscreen(-1, XBIOS_screens[1], -1);
     Setscreen(-1, -1, ST_LOW >> 8);
+    md_next_submit_seq = 1;
+    md_displayed_seq = 0;
+    md_applied_palette_seq = 0;
 
     pal_return = (volatile Uint16 *)MD_PALETTE_RETURN_ADDR;
     for (i = 0; i < 16; i++) {
@@ -324,6 +398,7 @@ static void setMode_MD(_THIS, const xbiosmode_t *new_video_mode)
 
 static void restoreMode_MD(_THIS)
 {
+    md_present_ready_frame(this);
     md_send_command(SDL_MD_QUIT, 0, 0, 0, NULL, 0);
     Setscreen(-1, XBIOS_oldvbase, XBIOS_oldvmode);
 }
@@ -331,6 +406,7 @@ static void restoreMode_MD(_THIS)
 static void vsync_MD(_THIS)
 {
     Vsync();
+    md_present_ready_frame(this);
 }
 
 static void getScreenFormat_MD(_THIS, int bpp,
@@ -356,8 +432,12 @@ static int getLineWidth_MD(_THIS, const xbiosmode_t *new_video_mode,
  */
 static void md_do_flip(_THIS)
 {
+    volatile md_mailbox_t *mailbox = (volatile md_mailbox_t *)MD_MAILBOX_ADDR;
     const Uint8 *src = (const Uint8 *)XBIOS_screens[0];
+    Uint32 seq = md_next_submit_seq;
     int y;
+
+    md_present_ready_frame(this);
 
     for (y = 0; y < sdl_md_h; y += MD_ROWS_PER_CHUNK) {
         int rows = sdl_md_h - y;
@@ -375,10 +455,11 @@ static void md_do_flip(_THIS)
                         src + y * sdl_md_w, (Uint32)bytes);
     }
 
-    md_send_command(SDL_MD_FLIP, 0, 0, 0, NULL, 0);
-
-    md_copy_planar_to_screen(XBIOS_screens[1]);
-    Setscreen(-1, XBIOS_screens[1], -1);
+    if (md_send_command(SDL_MD_FLIP, seq, 0, 0, NULL, 0) == 0) {
+        if (mailbox->submit_seq == seq) {
+            md_next_submit_seq = seq + 1;
+        }
+    }
 }
 
 static void swapVbuffers_MD(_THIS)
@@ -410,8 +491,12 @@ static int flipHW_MD(_THIS, SDL_Surface *surface)
  */
 static void updRects_MD(_THIS, int numrects, SDL_Rect *rects)
 {
+    volatile md_mailbox_t *mailbox = (volatile md_mailbox_t *)MD_MAILBOX_ADDR;
     const Uint8 *base = (const Uint8 *)XBIOS_screens[0];
+    Uint32 seq = md_next_submit_seq;
     int i;
+
+    md_present_ready_frame(this);
 
     for (i = 0; i < numrects; i++) {
         int x = rects[i].x;
@@ -451,15 +536,20 @@ static void updRects_MD(_THIS, int numrects, SDL_Rect *rects)
         /* Single rect: partial C2P only for the affected region */
         Uint32 d3 = ((Uint32)(Uint16)rects[0].x << 16) | (Uint32)(Uint16)rects[0].y;
         Uint32 d4 = ((Uint32)(Uint16)rects[0].w << 16) | (Uint32)(Uint16)rects[0].h;
-        md_send_command(SDL_MD_UPDATE_RECT, d3, d4, 0, NULL, 0);
+        if (md_send_command(SDL_MD_UPDATE_RECT, d3, d4, seq, NULL, 0) == 0) {
+            if (mailbox->submit_seq == seq) {
+                md_next_submit_seq = seq + 1;
+            }
+        }
     } else if (numrects > 1) {
-        md_send_command(SDL_MD_FLIP, 0, 0, 0, NULL, 0);
+        if (md_send_command(SDL_MD_FLIP, seq, 0, 0, NULL, 0) == 0) {
+            if (mailbox->submit_seq == seq) {
+                md_next_submit_seq = seq + 1;
+            }
+        }
     } else {
         return;  /* nothing to do */
     }
-
-    md_copy_planar_to_screen(XBIOS_screens[1]);
-    Setscreen(-1, XBIOS_screens[1], -1);
 }
 
 static int allocVbuffers_MD(_THIS, const xbiosmode_t *new_video_mode,
@@ -514,7 +604,6 @@ static int setColors_MD(_THIS, int firstcolor, int ncolors, SDL_Color *colors)
     static Uint8 rgb_buf[768];
     SDL_Palette *pal = this->screen->format->palette;
     int i;
-    volatile Uint16 *pal_return;
 
     if (pal == NULL) return 0;
 
@@ -538,12 +627,6 @@ static int setColors_MD(_THIS, int firstcolor, int ncolors, SDL_Color *colors)
                         rgb_buf, 768) != 0) {
         return 0;
     }
-
-    pal_return = (volatile Uint16 *)MD_PALETTE_RETURN_ADDR;
-    for (i = 0; i < 16; i++) {
-        TT_palette[i] = pal_return[i];
-    }
-    Setpalette(TT_palette);
 
     return 1;
 }
