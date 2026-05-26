@@ -52,7 +52,7 @@
 #define MD_RANDOM_TOKEN_ADDR    0xFAFA00UL   /* 4 B — RP2040 completion token  */
 #define MD_RANDOM_SEED_ADDR     0xFAFA04UL   /* 4 B — token seed for sync      */
 #define MD_READY_ADDR           0xFAFA10UL   /* 2 B — ready flag written by RP2040 */
-#define MD_READY_MAGIC          0x4Du        /* 'M' — must match SDL_MD_READY_MAGIC */
+#define MD_READY_MAGIC          0x4D4Du      /* 'MM' — both bytes must match       */
 #define MD_MAILBOX_ADDR         0xFAFA20UL   /* Async mailbox                  */
 #define MD_PALETTE_RETURN_ADDR  0xFAFA80UL   /* 32 B — 16 × uint16_t STE pal   */
 #define MD_ROMCMD_BASE          0xFB0000UL
@@ -63,6 +63,8 @@
  * ========================================================================= */
 #define MD_CMD_MAGIC        0xABCDu
 #define MD_COMMAND_TIMEOUT  0x0000FFFFul
+#define MD_DETECT_TIMEOUT   0x0000FFFFul
+#define MD_PING_MAGIC       0x4D44534CUL  /* 'MDSL' */
 
 /* =========================================================================
  * Command IDs (must match rp/src/include/sdl_commands.h)
@@ -74,6 +76,7 @@
 #define SDL_MD_FILL_RECT    0x05u
 #define SDL_MD_FLIP         0x06u
 #define SDL_MD_UPDATE_RECT  0x07u
+#define SDL_MD_PING         0x08u
 #define SDL_MD_RELEASE_FRAME 0x09u
 
 /* =========================================================================
@@ -152,7 +155,13 @@ static Uint32 md_applied_palette_seq = 0;
 static inline void md_send_word(Uint16 val)
 {
     volatile Uint8 *bus = (volatile Uint8 *)MD_ROMCMD_ADDR;
-    (void)bus[val];
+    /* Sign-extend val so values with bit 15 set wrap *down* into
+     * $FB0000-$FB7FFF rather than overflowing past $FBFFFF.  This matches
+     * the 68k "tst.b (a0, d7.w)" addressing used by the assembly stubs in
+     * md-js / md-sprites-demo, which the firmware-side PIO decoder was
+     * designed against (it requires address bit 16 set, which an unsigned
+     * Uint8 index would clear for val >= $8000). */
+    (void)bus[(Sint16)val];
 }
 
 /*
@@ -166,9 +175,10 @@ static inline void md_send_word(Uint16 val)
  *
  * Returns 0 on success, -1 on timeout.
  */
-static int md_send_command(Uint8 cmd_id,
-                           Uint32 d3, Uint32 d4, Uint32 d5,
-                           const Uint8 *buf, Uint32 buf_len)
+static int md_send_command_timeout(Uint8 cmd_id,
+                                   Uint32 d3, Uint32 d4, Uint32 d5,
+                                   const Uint8 *buf, Uint32 buf_len,
+                                   Uint32 timeout_limit)
 {
     Uint32 seed;
     Uint16 token_lo, token_hi;
@@ -222,12 +232,21 @@ static int md_send_command(Uint8 cmd_id,
 
     md_send_word(checksum);
 
-    timeout = MD_COMMAND_TIMEOUT;
-    while (*(volatile Uint32 *)MD_RANDOM_TOKEN_ADDR != expected_token) {
+    timeout = timeout_limit;
+    while ((*(volatile Uint32 *)MD_RANDOM_TOKEN_ADDR != expected_token) ||
+           (*(volatile Uint32 *)MD_RANDOM_SEED_ADDR == seed)) {
         if (--timeout == 0) return -1;
     }
 
     return 0;
+}
+
+static int md_send_command(Uint8 cmd_id,
+                           Uint32 d3, Uint32 d4, Uint32 d5,
+                           const Uint8 *buf, Uint32 buf_len)
+{
+    return md_send_command_timeout(cmd_id, d3, d4, d5, buf, buf_len,
+                                   MD_COMMAND_TIMEOUT);
 }
 
 /* =========================================================================
@@ -339,6 +358,7 @@ static void md_present_ready_frame(_THIS)
 int SDL_XBIOS_MD_Detect(void)
 {
     long cookie_vdo = 0;
+    long cookie_mdsl = 0;
     int vdo;
 
     /* Only ST and STE machines are supported */
@@ -348,7 +368,25 @@ int SDL_XBIOS_MD_Detect(void)
     }
     /* If no _VDO cookie, assume ST (pre-TOS 1.06) — continue */
 
-    if (*(volatile Uint8 *)MD_READY_ADDR != MD_READY_MAGIC) {
+    /* Gate on the MDSL cookie installed by the MD/SDL boot stub when it
+     * detected a live firmware at boot.  This is the *only* signal we trust
+     * for firmware presence — cartridge ROM addresses (ready word, seed,
+     * etc.) can hold stale values from previous firmware loads and would
+     * give false positives that crash on the subsequent ping.  The boot
+     * stub installs MDSL=1 in the system cookie jar only after polling the
+     * RP2040's ready byte for up to 250 VBLs, so a present cookie is
+     * authoritative proof the firmware came up. */
+    if (Getcookie(0x4D44534CL /* 'MDSL' */, &cookie_mdsl) != C_FOUND) {
+        return 0;
+    }
+    if (cookie_mdsl == 0) {
+        return 0;
+    }
+
+    /* Optional final sanity ping — at this point we are certain the firmware
+     * is alive, so any timeout here is a real problem, not a false positive. */
+    if (md_send_command_timeout(SDL_MD_PING, MD_PING_MAGIC, 0, 0, NULL, 0,
+                                MD_DETECT_TIMEOUT) != 0) {
         return 0;
     }
     return 1;

@@ -7,3 +7,5 @@ AudioBootStrap MINTAUDIO_GSXB_bootstrap = {
 	0,
 	0
 };
+
+void SDL_AtariMint_UpdateAudio(void) {}

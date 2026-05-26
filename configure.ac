@@ -355,7 +355,7 @@ CheckALSA()
 [AS_HELP_STRING([--enable-alsa], [support the ALSA audio API [default=yes]])],
                   , enable_alsa=yes)
     if test x$enable_audio = xyes -a x$enable_alsa = xyes; then
-        AM_PATH_ALSA(0.9.0, have_alsa=yes, have_alsa=no)
+        have_alsa=no
         # Restore all flags from before the ALSA detection runs
         CFLAGS="$alsa_save_CFLAGS"
         LDFLAGS="$alsa_save_LDFLAGS"
@@ -450,7 +450,7 @@ CheckESD()
 [AS_HELP_STRING([--enable-esd], [support the Enlightened Sound Daemon [default=yes]])],
                   , enable_esd=yes)
     if test x$enable_audio = xyes -a x$enable_esd = xyes; then
-        AM_PATH_ESD(0.2.8, have_esd=yes, have_esd=no)
+        have_esd=no
         if test x$have_esd = xyes; then
             AC_ARG_ENABLE(esd-shared,
 [AS_HELP_STRING([--enable-esd-shared], [dynamically load ESD audio support [default=yes]])],
