@@ -358,8 +358,8 @@ static void md_present_ready_frame(_THIS)
 int SDL_XBIOS_MD_Detect(void)
 {
     long cookie_vdo = 0;
-    long cookie_mdsl = 0;
     int vdo;
+    Uint32 seed;
 
     /* Only ST and STE machines are supported */
     if (Getcookie(C__VDO, &cookie_vdo) == C_FOUND) {
@@ -368,23 +368,18 @@ int SDL_XBIOS_MD_Detect(void)
     }
     /* If no _VDO cookie, assume ST (pre-TOS 1.06) — continue */
 
-    /* Gate on the MDSL cookie installed by the MD/SDL boot stub when it
-     * detected a live firmware at boot.  This is the *only* signal we trust
-     * for firmware presence — cartridge ROM addresses (ready word, seed,
-     * etc.) can hold stale values from previous firmware loads and would
-     * give false positives that crash on the subsequent ping.  The boot
-     * stub installs MDSL=1 in the system cookie jar only after polling the
-     * RP2040's ready byte for up to 250 VBLs, so a present cookie is
-     * authoritative proof the firmware came up. */
-    if (Getcookie(0x4D44534CL /* 'MDSL' */, &cookie_mdsl) != C_FOUND) {
-        return 0;
-    }
-    if (cookie_mdsl == 0) {
+    if (*(volatile Uint16 *)MD_READY_ADDR != MD_READY_MAGIC) {
         return 0;
     }
 
-    /* Optional final sanity ping — at this point we are certain the firmware
-     * is alive, so any timeout here is a real problem, not a false positive. */
+    /* Guard against a stale-cartridge false positive: the firmware seeds
+     * the token register from a hardware RNG at startup, so an absent
+     * firmware will almost always leave $00000000 or $FFFFFFFF here. */
+    seed = *(volatile Uint32 *)MD_RANDOM_SEED_ADDR;
+    if (seed == 0u || seed == 0xFFFFFFFFu) {
+        return 0;
+    }
+
     if (md_send_command_timeout(SDL_MD_PING, MD_PING_MAGIC, 0, 0, NULL, 0,
                                 MD_DETECT_TIMEOUT) != 0) {
         return 0;
