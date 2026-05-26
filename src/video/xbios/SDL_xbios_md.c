@@ -51,6 +51,8 @@
 #define MD_FRAMEBUFFER1_ADDR    0xFA7D00UL   /* 32 000 B planar slot 1         */
 #define MD_RANDOM_TOKEN_ADDR    0xFAFA00UL   /* 4 B — RP2040 completion token  */
 #define MD_RANDOM_SEED_ADDR     0xFAFA04UL   /* 4 B — token seed for sync      */
+#define MD_READY_ADDR           0xFAFA10UL   /* 2 B — ready flag written by RP2040 */
+#define MD_READY_MAGIC          0x4Du        /* 'M' — must match SDL_MD_READY_MAGIC */
 #define MD_MAILBOX_ADDR         0xFAFA20UL   /* Async mailbox                  */
 #define MD_PALETTE_RETURN_ADDR  0xFAFA80UL   /* 32 B — 16 × uint16_t STE pal   */
 #define MD_ROMCMD_BASE          0xFB0000UL
@@ -61,7 +63,6 @@
  * ========================================================================= */
 #define MD_CMD_MAGIC        0xABCDu
 #define MD_COMMAND_TIMEOUT  0x0000FFFFul
-#define MD_PING_MAGIC       0x4D44534CUL   /* 'MDSL' */
 
 /* =========================================================================
  * Command IDs (must match rp/src/include/sdl_commands.h)
@@ -73,7 +74,6 @@
 #define SDL_MD_FILL_RECT    0x05u
 #define SDL_MD_FLIP         0x06u
 #define SDL_MD_UPDATE_RECT  0x07u
-#define SDL_MD_PING         0x08u
 #define SDL_MD_RELEASE_FRAME 0x09u
 
 /* =========================================================================
@@ -348,7 +348,7 @@ int SDL_XBIOS_MD_Detect(void)
     }
     /* If no _VDO cookie, assume ST (pre-TOS 1.06) — continue */
 
-    if (md_send_command(SDL_MD_PING, MD_PING_MAGIC, 0, 0, NULL, 0) != 0) {
+    if (*(volatile Uint8 *)MD_READY_ADDR != MD_READY_MAGIC) {
         return 0;
     }
     return 1;
