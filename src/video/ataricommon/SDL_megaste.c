@@ -41,15 +41,13 @@
  * suggest) does not actually switch the CPU.  See:
  *   https://github.com/phjanderson/MSTE_CC
  *
- * TODO: Restore 16 MHz + cache (MEGASTE_16MHZ_CACHE, $FF) once the
- *       underlying ACSI2STM issue is understood / a workaround is in place.
- *
- * We currently run 16 MHz with the cache *disabled* ($FE) because enabling
- * the cache trips a known bug in the ACSI2STM hard-disk adapter — under
- * 16 MHz+cache, ACSI transfers occasionally corrupt and the system bombs
- * shortly after launching any SDL app that touches the disk.  The cache
- * typically buys ~10-15% extra performance, so until ACSI2STM is fixed
- * (or we add a runtime opt-out) we trade that for stability.
+ * Historical note: 16 MHz + cache previously crashed when paired with
+ * ACSI2STM in GemDrive mode (transfers would corrupt and bomb the system
+ * shortly after launching any SDL app that touched the disk).  Resolved
+ * upstream in the "tin" fork — use 5.1tin or newer:
+ *   https://github.com/tin-nl/acsi2stm/releases/tag/5.1tin
+ * If you ever see those symptoms again, suspect the ACSI2STM firmware
+ * version first, not this register.
  */
 #define MEGASTE_16MHZ_CACHE    0xFFu
 #define MEGASTE_16MHZ_NOCACHE  0xFEu
@@ -66,7 +64,7 @@ void SDL_MegaSTE_EnableTurbo(void)
     if (cookie_mch != MCH_MEGA_STE_COOKIE) return;
     oldstack = (void *)Super(NULL);
     megaste_saved_ctrl = *MEGASTE_CTRL_ADDR;
-    *MEGASTE_CTRL_ADDR = MEGASTE_16MHZ_NOCACHE;
+    *MEGASTE_CTRL_ADDR = MEGASTE_16MHZ_CACHE;
     SuperToUser(oldstack);
     megaste_turbo_enabled = SDL_TRUE;
 }
